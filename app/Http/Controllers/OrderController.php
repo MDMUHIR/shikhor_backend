@@ -3,17 +3,26 @@
 namespace App\Http\Controllers;
 
 use App\Models\Cart;
+use App\Models\CartCourse;
 use App\Models\Coupon;
+use App\Models\Course;
+use App\Models\Enrollment;
 use App\Models\Order;
+use App\Models\OrderCourse;
 use App\Models\OrderProduct;
 use App\Models\OrderStatusHistory;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\CourseAccessService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
 {
+    public function __construct(private readonly CourseAccessService $access)
+    {
+    }
+
     public function addOrder(Request $request)
     {
         $cart = Cart::with(['product.images', 'variant.attributes'])
@@ -21,12 +30,17 @@ class OrderController extends Controller
             ->where('is_selected', true)
             ->get();
 
-        if ($cart->isEmpty()) {
+        $cartCourses = CartCourse::with('course')
+            ->where('user_id', $request->user()->id)
+            ->where('is_selected', true)
+            ->get();
+
+        if ($cart->isEmpty() && $cartCourses->isEmpty()) {
             return $this->error('No items selected for order', 400);
         }
 
         try {
-            $order = DB::transaction(function () use ($request, $cart) {
+            $order = DB::transaction(function () use ($request, $cart, $cartCourses) {
                 $order = $this->createOrder($request, $request->user()->id);
 
                 foreach ($cart as $item) {
@@ -69,11 +83,27 @@ class OrderController extends Controller
                     }
                 }
 
+                foreach ($cartCourses as $item) {
+                    $course = Course::lockForUpdate()->find($item->course_id);
+
+                    if (!$course || !$course->isPublished()) {
+                        throw new \Exception('Course is not available: ' . $item->course_id);
+                    }
+
+                    $this->createOrderCourseItem($order->id, $course);
+                }
+
                 Cart::where('user_id', $request->user()->id)
                     ->where('is_selected', true)
                     ->delete();
 
+                CartCourse::where('user_id', $request->user()->id)
+                    ->where('is_selected', true)
+                    ->delete();
+
                 $this->updateOrderTotals($order, $request);
+
+                $this->syncOrderEnrollments($order);
 
                 return $order;
             });
@@ -81,14 +111,22 @@ class OrderController extends Controller
             return $this->error($e->getMessage(), 400);
         }
 
-        return $this->success('Order placed successfully', $this->formatOrder($order->fresh()->load('items', 'statusHistories')));
+        return $this->success(
+            'Order placed successfully',
+            $this->formatOrder($order->fresh()->load('items', 'courseItems', 'statusHistories'))
+        );
     }
 
     public function directOrder(Request $request)
     {
         $items = $request->items;
+        $courseIds = $request->input('course_ids', []);
 
-        if (!$items || !is_array($items)) {
+        if (! is_array($courseIds)) {
+            $courseIds = [$courseIds];
+        }
+
+        if ((! $items || ! is_array($items)) && $request->filled('product_id')) {
             $items = [[
                 'product_id' => $request->product_id,
                 'variant_id' => $request->variant_id ?? null,
@@ -96,18 +134,21 @@ class OrderController extends Controller
             ]];
         }
 
-        if (empty($items)) {
+        if (empty($items) && empty($courseIds)) {
             return $this->error('No items provided', 400);
         }
 
         $request->validate([
             'payment_method' => 'required|string',
+            'course_ids' => 'nullable|array',
+            'course_ids.*' => 'integer|exists:courses,id',
         ]);
 
         $errors = [];
         $validatedItems = [];
+        $validatedCourses = [];
 
-        foreach ($items as $index => $item) {
+        foreach ($items ?: [] as $index => $item) {
             $productId = $item['product_id'] ?? null;
             $variantId = $item['variant_id'] ?? null;
             $quantity = $item['quantity'] ?? 1;
@@ -167,12 +208,31 @@ class OrderController extends Controller
             ];
         }
 
+        if (empty($validatedItems) && empty($errors) && empty($courseIds)) {
+            return $this->error('No items provided', 400);
+        }
+
         if (empty($validatedItems) && !empty($errors)) {
             return $this->error(implode('. ', $errors), 400);
         }
 
+        foreach ($courseIds as $index => $courseId) {
+            $course = Course::query()->published()->find($courseId);
+
+            if (! $course) {
+                $errors[] = 'Course ' . ($index + 1) . ': not available';
+                continue;
+            }
+
+            $validatedCourses[] = $course;
+        }
+
+        if (empty($validatedItems) && empty($validatedCourses)) {
+            return $this->error(implode('. ', $errors) ?: 'No valid items provided', 400);
+        }
+
         try {
-            $order = DB::transaction(function () use ($request, $validatedItems) {
+            $order = DB::transaction(function () use ($request, $validatedItems, $validatedCourses) {
                 $order = $this->createOrder($request, $request->user()->id);
 
                 foreach ($validatedItems as $item) {
@@ -206,7 +266,19 @@ class OrderController extends Controller
                     }
                 }
 
+                foreach ($validatedCourses as $course) {
+                    $locked = Course::lockForUpdate()->find($course->id);
+
+                    if (! $locked || ! $locked->isPublished()) {
+                        throw new \Exception('Course is not available: ' . $course->id);
+                    }
+
+                    $this->createOrderCourseItem($order->id, $locked);
+                }
+
                 $this->updateOrderTotals($order, $request);
+
+                $this->syncOrderEnrollments($order);
 
                 return $order;
             });
@@ -214,12 +286,15 @@ class OrderController extends Controller
             return $this->error($e->getMessage(), 400);
         }
 
-        return $this->success('Order placed successfully', $this->formatOrder($order->fresh()->load('items', 'statusHistories')));
+        return $this->success(
+            'Order placed successfully',
+            $this->formatOrder($order->fresh()->load('items', 'courseItems', 'statusHistories'))
+        );
     }
 
     public function getOrder(Request $request)
     {
-        $orders = Order::with('items', 'statusHistories')
+        $orders = Order::with('items', 'courseItems', 'statusHistories')
             ->where('user_id', $request->user()->id)
             ->latest()
             ->get();
@@ -229,7 +304,7 @@ class OrderController extends Controller
 
     public function getAdminOrders(Request $request)
     {
-        $orders = Order::with('items', 'statusHistories', 'user')
+        $orders = Order::with('items', 'courseItems', 'statusHistories', 'user')
             ->latest()
             ->get();
 
@@ -238,7 +313,7 @@ class OrderController extends Controller
 
     public function getAdminOrder(Request $request, $id)
     {
-        $order = Order::with('items', 'statusHistories', 'user')->find($id);
+        $order = Order::with('items', 'courseItems', 'statusHistories', 'user')->find($id);
 
         if (!$order) {
             return $this->error('Order not found', 404);
@@ -300,7 +375,67 @@ class OrderController extends Controller
 
         $this->updateOrderTotals($order, $request);
 
-        return $this->success('Order updated successfully', $this->formatOrder($order->fresh()->load('items', 'statusHistories')));
+        $this->handleEnrollmentLifecycle($order);
+
+        return $this->success(
+            'Order updated successfully',
+            $this->formatOrder($order->fresh()->load('items', 'courseItems', 'statusHistories'))
+        );
+    }
+
+    /**
+     * Enroll or revoke course access based on the order status / payment status.
+     */
+    private function handleEnrollmentLifecycle(Order $order): void
+    {
+        $order->loadMissing('courseItems');
+
+        if ($order->courseItems->isEmpty()) {
+            return;
+        }
+
+        $revokingStatuses = ['cancelled', 'refunded', 'returned'];
+
+        if (in_array($order->status, $revokingStatuses, true)) {
+            $this->access->revokeForOrder($order);
+
+            return;
+        }
+
+        $enrollOnPlacement = (bool) config('courses.enroll_on_order_placement', true);
+        $isPaid = $order->payment_status === 'paid';
+
+        if ($enrollOnPlacement || $isPaid) {
+            $this->access->ensureEnrollmentsForOrder($order);
+        }
+    }
+
+    /**
+     * Grant access when the order is placed (config controlled).
+     */
+    private function syncOrderEnrollments(Order $order): void
+    {
+        if (! (bool) config('courses.enroll_on_order_placement', true)) {
+            return;
+        }
+
+        $this->access->ensureEnrollmentsForOrder($order);
+    }
+
+    private function createOrderCourseItem($orderId, Course $course): OrderCourse
+    {
+        return OrderCourse::create([
+            'order_id' => $orderId,
+            'course_id' => $course->id,
+            'name' => $course->title,
+            'slug' => $course->slug,
+            'image' => $course->thumbnail,
+            'original_price' => $course->price,
+            'unit_price' => $course->effective_price,
+            'discount' => max((float) $course->price - $course->effective_price, 0),
+            'line_total' => $course->effective_price,
+            'access_days' => $course->access_days,
+        ]);
     }
 
     private function createOrder(Request $request, $userId): Order
@@ -404,9 +539,10 @@ class OrderController extends Controller
     private function updateOrderTotals(Order $order, Request $request)
     {
         $items = $order->items()->get();
+        $courseItems = $order->courseItems()->get();
         $totalQuantity = $items->sum('quantity');
-        $totalItems = $items->count();
-        $subtotal = $items->sum('line_total');
+        $totalItems = $items->count() + $courseItems->count();
+        $subtotal = $items->sum('line_total') + $courseItems->sum('line_total');
 
         $order->total_items = $totalItems;
         $order->total_quantity = $totalQuantity;
@@ -449,8 +585,20 @@ class OrderController extends Controller
             'stock_snapshot' => $item->stock_snapshot,
         ])->values()->toArray();
 
-        $statusHistory = $order->statusHistories->map(fn($h) => [
-            'status' => $h->status,
+        $courseItems = $order->courseItems->map(fn($item) => [
+            'id' => $item->id,
+            'course_id' => $item->course_id,
+            'name' => $item->name,
+            'slug' => $item->slug,
+            'image' => $item->image,
+            'original_price' => (float) $item->original_price,
+            'unit_price' => (float) $item->unit_price,
+            'discount' => (float) $item->discount,
+            'line_total' => (float) $item->line_total,
+            'access_days' => $item->access_days,
+        ])->values()->toArray();
+
+        $statusHistory = $order->statusHistories->map(fn($h) => [            'status' => $h->status,
             'label' => $h->label ?? $this->statusLabel($h->status),
             'note' => $h->note,
             'created_by' => $h->created_by,
@@ -482,6 +630,8 @@ class OrderController extends Controller
             'pricing' => [
                 'currency' => $order->currency ?? 'BDT',
                 'subtotal' => (float) ($order->subtotal ?? 0),
+                'products_subtotal' => round(collect($items)->sum('line_total'), 2),
+                'courses_subtotal' => round(collect($courseItems)->sum('line_total'), 2),
                 'delivery_charge' => (float) ($order->delivery_charge ?? 0),
                 'discount' => (float) ($order->discount ?? 0),
                 'discount_type' => $order->discount_type,
@@ -497,6 +647,7 @@ class OrderController extends Controller
                 'total_quantity' => (int) ($order->total_quantity ?? 0),
             ],
             'items' => $items,
+            'course_items' => $courseItems,
             'status_history' => $statusHistory,
             'notes' => $order->notes,
             'created_at' => $order->created_at?->toIso8601String(),

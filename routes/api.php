@@ -5,10 +5,19 @@ use App\Http\Controllers\BannerController;
 use App\Http\Controllers\BlogController;
 use App\Http\Controllers\CartController;
 use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\CertificateController;
 use App\Http\Controllers\CouponController;
+use App\Http\Controllers\CourseCartController;
+use App\Http\Controllers\CourseCategoryController;
+use App\Http\Controllers\CourseController;
+use App\Http\Controllers\CourseReviewController;
+use App\Http\Controllers\CourseSectionController;
 use App\Http\Controllers\DeliveryChargeController;
+use App\Http\Controllers\EnrollmentController;
+use App\Http\Controllers\LessonController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\QuizController;
 use App\Http\Controllers\WishListController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -50,6 +59,25 @@ Route::get('blogs', [BlogController::class, 'getBlogs']);
 Route::get('blogs/{id}', [BlogController::class, 'getSingleBlog']);
 Route::get('blog-categories', [BlogController::class, 'getBlogCategories']);
 Route::get('blog-tags', [BlogController::class, 'getBlogTags']);
+
+/*
+|--------------------------------------------------------------------------
+| Course catalog (public)
+|--------------------------------------------------------------------------
+*/
+
+Route::get('courses', [CourseController::class, 'index']);
+Route::get('courses/{slug}/reviews', [CourseReviewController::class, 'index']);
+Route::get('courses/{slug}', [CourseController::class, 'show']);
+Route::get('course-categories', [CourseCategoryController::class, 'index']);
+
+// Signed URL used by the video player for privately hosted lesson videos.
+Route::get('lessons/{lesson}/stream', [LessonController::class, 'stream'])
+    ->middleware('signed')
+    ->name('lessons.stream');
+
+// Public certificate verification.
+Route::get('certificates/verify/{number}', [CertificateController::class, 'verify']);
 
 Route::group(['prefix' => 'admin'], function () {
     Route::group(['middleware' => 'auth:sanctum'], function () {
@@ -105,6 +133,58 @@ Route::group(['prefix' => 'admin'], function () {
             Route::post('delivery-charges/add', [DeliveryChargeController::class, 'addDeliveryCharge']);
             Route::post('delivery-charges/update', [DeliveryChargeController::class, 'updateDeliveryCharge']);
             Route::delete('delivery-charges/delete/{id}', [DeliveryChargeController::class, 'deleteDeliveryCharge']);
+
+            /*
+            | Course management
+            */
+
+            Route::get('course-categories', [CourseCategoryController::class, 'adminIndex']);
+            Route::post('course-categories/add', [CourseCategoryController::class, 'store']);
+            Route::post('course-categories/update', [CourseCategoryController::class, 'update']);
+            Route::delete('course-categories/delete/{id}', [CourseCategoryController::class, 'destroy']);
+
+            Route::get('courses', [CourseController::class, 'adminIndex']);
+            Route::get('courses/{id}', [CourseController::class, 'adminShow']);
+            Route::post('courses/add', [CourseController::class, 'store']);
+            Route::post('courses/update', [CourseController::class, 'update']);
+            Route::delete('courses/delete/{id}', [CourseController::class, 'destroy']);
+
+            Route::get('courses/{courseId}/sections', [CourseSectionController::class, 'index']);
+            Route::post('course-sections/add', [CourseSectionController::class, 'store']);
+            Route::post('course-sections/update', [CourseSectionController::class, 'update']);
+            Route::post('course-sections/reorder', [CourseSectionController::class, 'reorder']);
+            Route::delete('course-sections/delete/{id}', [CourseSectionController::class, 'destroy']);
+
+            Route::get('courses/{courseId}/lessons', [LessonController::class, 'adminIndex']);
+            Route::get('lessons/{id}', [LessonController::class, 'adminShow']);
+            Route::post('lessons/add', [LessonController::class, 'store']);
+            Route::post('lessons/update', [LessonController::class, 'update']);
+            Route::post('lessons/reorder', [LessonController::class, 'reorder']);
+            Route::delete('lessons/delete/{id}', [LessonController::class, 'destroy']);
+
+            Route::get('enrollments', [EnrollmentController::class, 'adminIndex']);
+            Route::post('enrollments/grant', [EnrollmentController::class, 'grant']);
+            Route::post('enrollments/extend', [EnrollmentController::class, 'extend']);
+            Route::post('enrollments/revoke/{id}', [EnrollmentController::class, 'revoke']);
+            Route::post('enrollments/reactivate/{id}', [EnrollmentController::class, 'reactivate']);
+
+            Route::get('reviews', [CourseReviewController::class, 'adminIndex']);
+            Route::post('reviews/{id}/approve', [CourseReviewController::class, 'approve']);
+            Route::post('reviews/{id}/reject', [CourseReviewController::class, 'reject']);
+            Route::delete('reviews/delete/{id}', [CourseReviewController::class, 'adminDestroy']);
+
+            Route::get('quizzes', [QuizController::class, 'adminIndex']);
+            Route::get('quizzes/{id}', [QuizController::class, 'adminShow']);
+            Route::post('quizzes/add', [QuizController::class, 'store']);
+            Route::post('quizzes/update', [QuizController::class, 'update']);
+            Route::delete('quizzes/delete/{id}', [QuizController::class, 'destroy']);
+            Route::post('quiz-questions/add', [QuizController::class, 'storeQuestion']);
+            Route::post('quiz-questions/update', [QuizController::class, 'updateQuestion']);
+            Route::delete('quiz-questions/delete/{id}', [QuizController::class, 'destroyQuestion']);
+
+            Route::get('certificates', [CertificateController::class, 'adminIndex']);
+            Route::post('certificates/revoke/{id}', [CertificateController::class, 'revoke']);
+            Route::post('certificates/restore/{id}', [CertificateController::class, 'restore']);
         });
     });
 });
@@ -128,6 +208,44 @@ Route::group(['middleware' => 'auth:sanctum'], function () {
     Route::get('orders', [OrderController::class, 'getOrder']);
     Route::post('orders/add', [OrderController::class, 'addOrder'])->middleware('throttle:sensitive');
     Route::post('orders/direct', [OrderController::class, 'directOrder'])->middleware('throttle:sensitive');
+
+    /*
+    | Course cart
+    */
+
+    Route::get('cart/courses', [CourseCartController::class, 'index']);
+    Route::post('cart/courses/add', [CourseCartController::class, 'add'])->middleware('throttle:cart');
+    Route::post('cart/courses/toggle-selection', [CourseCartController::class, 'toggleSelection']);
+    Route::post('cart/courses/select-all', [CourseCartController::class, 'selectAll']);
+    Route::post('cart/courses/deselect-all', [CourseCartController::class, 'deselectAll']);
+    Route::delete('cart/courses/delete/{id}', [CourseCartController::class, 'destroy']);
+
+    /*
+    | Student learning
+    */
+
+    Route::get('my/courses', [EnrollmentController::class, 'myCourses']);
+    Route::get('my/courses/{slug}', [EnrollmentController::class, 'show']);
+    Route::get('my/courses/{slug}/learn', [LessonController::class, 'learning']);
+    Route::get('my/certificates', [CertificateController::class, 'mine']);
+
+    Route::get('lessons/{id}', [LessonController::class, 'show']);
+    Route::post('lessons/{id}/complete', [LessonController::class, 'complete']);
+    Route::post('lessons/{id}/incomplete', [LessonController::class, 'incomplete']);
+    Route::post('lessons/{id}/progress', [LessonController::class, 'trackProgress']);
+
+    Route::get('courses/{slug}/reviews/mine', [CourseReviewController::class, 'mine']);
+    Route::post('courses/{slug}/reviews', [CourseReviewController::class, 'store'])->middleware('throttle:sensitive');
+    Route::delete('courses/{slug}/reviews', [CourseReviewController::class, 'destroy']);
+
+    Route::get('quizzes/{id}', [QuizController::class, 'show']);
+    Route::post('quizzes/{id}/submit', [QuizController::class, 'submit'])->middleware('throttle:sensitive');
+    Route::get('quizzes/{id}/attempts', [QuizController::class, 'attempts']);
+    Route::get('quiz-attempts/{id}', [QuizController::class, 'result']);
+
+    Route::post('courses/{slug}/certificate', [CertificateController::class, 'issue'])->middleware('throttle:sensitive');
+    Route::get('certificates/{number}/download', [CertificateController::class, 'download']);
+    Route::get('certificates/{number}', [CertificateController::class, 'show']);
 
     Route::get('logout', [AuthController::class, 'logout']);
     Route::get('user', [AuthController::class, 'user']);

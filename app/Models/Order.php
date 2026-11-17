@@ -50,6 +50,17 @@ class Order extends Model
         return $this->hasMany(OrderProduct::class, 'order_id');
     }
 
+    public function courseItems()
+    {
+        return $this->hasMany(OrderCourse::class, 'order_id');
+    }
+
+    public function courses()
+    {
+        return $this->belongsToMany(Course::class, 'order_courses', 'order_id', 'course_id')
+            ->withPivot('name', 'slug', 'image', 'original_price', 'unit_price', 'discount', 'line_total', 'access_days');
+    }
+
     public function statusHistories()
     {
         return $this->hasMany(OrderStatusHistory::class, 'order_id');
