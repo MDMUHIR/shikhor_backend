@@ -3,8 +3,6 @@
 namespace Database\Seeders;
 
 use App\Models\User;
-use Carbon\Carbon;
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 
@@ -15,21 +13,24 @@ class UserSeeder extends Seeder
      */
     public function run(): void
     {
-        User::where('id', '>', 0)->delete();
+        User::updateOrCreate(
+            ['email' => 'admin@gmail.com'],
+            [
+                'name' => 'admin',
+                'email_verified_at' => now(),
+                'password' => Hash::make('admin'),
+                'type' => 'admin',
+            ]
+        );
 
-        User::create([
-            'name' => 'admin',
-            'email' => 'admin@gmail.com',
-            'email_verified_at' => Carbon::now(),
-            'password' => Hash::make('admin'),
-            'type' => 'admin',
-        ]);
-        User::create([
-            'name' => 'customer',
-            'email' => 'customer@gmail.com',
-            'email_verified_at' => Carbon::now(),
-            'password' => Hash::make('customer'),
-            'type' => 'customer',
-        ]);
+        User::updateOrCreate(
+            ['email' => 'customer@gmail.com'],
+            [
+                'name' => 'customer',
+                'email_verified_at' => now(),
+                'password' => Hash::make('customer'),
+                'type' => 'customer',
+            ]
+        );
     }
 }
