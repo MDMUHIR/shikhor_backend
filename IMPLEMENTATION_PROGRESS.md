@@ -35,3 +35,11 @@ Status: core backend complete. `php artisan test` → 17 passed. Migrations appl
 - Reviews: responses include `status`; `is_approved` kept for compatibility.
 - Enrollment status `revoked` is now `cancelled`; `completed` is an active state.
 - Validation errors from new endpoints use Laravel's 422 format.
+
+## Exams (dedicated, auto-marked)
+- Tables `exams`, `exam_questions`, `exam_attempts` (migration `2026_11_23_000001`). `ExamService` does all marking server-side.
+- Negative marking is set per exam by the admin: off / fraction of the question marks (0–1) / fixed marks, optional per-question override, optional "allow total below zero". Rules are snapshotted into each attempt, and questions lock once students have attempted.
+- Server-kept timer (deadline stored at start, 20 s grace on the final submit), autosave endpoint, one live attempt per student (unique `active_key`), max attempts, open/close window, course-enrollment gating, `show_answers` policy.
+- Student API: `GET exams`, `GET exams/{id}`, `POST exams/{id}/start`, `GET exam-attempts/{id}`, `POST exam-attempts/{id}/answers`, `POST exam-attempts/{id}/submit`, `GET exams/{id}/attempts`.
+- Admin/instructor API: `admin/exams` (index/show/add/update/delete), `admin/exam-questions/*`, `GET admin/exams/{id}/attempts` (results + stats).
+- Scheduler: `exams:finalize-expired` runs every minute (needs `php artisan schedule:work` / cron `schedule:run`).

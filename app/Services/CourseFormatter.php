@@ -12,6 +12,13 @@ class CourseFormatter
 {
     public function formatCourse(Course $course, bool $includeCurriculum = false): array
     {
+        // Every course payload carries its public instructor profile (cheap when already eager loaded).
+        $course->loadMissing('instructor:id,name,headline,bio,avatar,type,is_active');
+
+        if ($course->instructor && ($course->instructor->is_active === false)) {
+            $course->setRelation('instructor', null);
+        }
+
         $data = [
             'id' => $course->id,
             'category_id' => $course->course_category_id,
@@ -32,7 +39,7 @@ class CourseFormatter
             'short_description' => $course->short_description,
             'banner' => $course->banner,
             'promo_video_source' => $course->promo_video_source,
-            'instructor' => $course->relationLoaded('instructor') && $course->instructor ? ['id' => $course->instructor->id, 'name' => $course->instructor->name, 'bio' => $course->instructor->bio, 'avatar' => $course->instructor->avatar] : null,
+            'instructor' => $course->instructor ? ['id' => $course->instructor->id, 'name' => $course->instructor->name, 'headline' => $course->instructor->headline, 'bio' => $course->instructor->bio, 'avatar' => $course->instructor->avatar] : null,
             'instructor_id' => $course->instructor_id,
             'tags' => $course->tags ?? [],
             'target_audience' => $course->target_audience ?? [],

@@ -12,7 +12,8 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        // $schedule->command('inspire')->hourly();
+        // Students who close the tab mid-exam still get marked when their time is up.
+        $schedule->command('exams:finalize-expired')->everyMinute()->withoutOverlapping();
     }
 
     /**

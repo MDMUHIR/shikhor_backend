@@ -84,7 +84,7 @@ class CourseController extends Controller
 
     public function index(Request $request)
     {
-        $query = Course::query()->published()->with(['category', 'instructor:id,name,bio,avatar']);
+        $query = Course::query()->published()->with(['category', 'instructor:id,name,headline,bio,avatar,is_active']);
 
         $this->applyFilters($query, $request);
 
@@ -102,7 +102,7 @@ class CourseController extends Controller
         $course = Course::query()
             ->published()
             ->with([
-                'category', 'instructor:id,name,bio,avatar',
+                'category', 'instructor:id,name,headline,bio,avatar,is_active',
                 'sections.lessons' => fn ($query) => $query->where('is_published', true),
             ])
             ->where('slug', $slug)
@@ -140,7 +140,7 @@ class CourseController extends Controller
 
     public function adminIndex(Request $request)
     {
-        $query = Course::query()->with(['category', 'instructor:id,name,bio,avatar']);
+        $query = Course::query()->with(['category', 'instructor:id,name,headline,bio,avatar,is_active']);
 
         if (! $request->user()->isAdmin()) {
             $query->where('instructor_id', $request->user()->id);
@@ -254,7 +254,7 @@ class CourseController extends Controller
             'offer_price' => $request->offer_price,
             'access_days' => $request->has('access_days') ? (int) $request->access_days : null,
             'status' => $status,
-            'is_featured' => $request->boolean('is_featured'),
+            'is_featured' => $request->user()->isAdmin() && $request->boolean('is_featured'),
             'requirements' => $request->requirements,
             'outcomes' => $request->outcomes,
             'published_at' => $status === 'published' ? now() : null,
@@ -306,7 +306,7 @@ class CourseController extends Controller
             'offer_price' => $request->has('offer_price') ? $request->offer_price : $course->offer_price,
             'access_days' => $request->has('access_days') ? (int) $request->access_days : $course->access_days,
             'status' => $this->resolveStatus($request, $request->input('status', $course->status)),
-            'is_featured' => $request->has('is_featured') ? $request->boolean('is_featured') : $course->is_featured,
+            'is_featured' => ($request->user()->isAdmin() && $request->has('is_featured')) ? $request->boolean('is_featured') : $course->is_featured,
             'requirements' => $request->has('requirements') ? $request->requirements : $course->requirements,
             'outcomes' => $request->has('outcomes') ? $request->outcomes : $course->outcomes,
         ];

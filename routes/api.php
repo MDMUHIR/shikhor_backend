@@ -18,6 +18,9 @@ use App\Http\Controllers\LessonController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProductController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\ExamAdminController;
+use App\Http\Controllers\ExamController;
+use App\Http\Controllers\InstructorController;
 use App\Http\Controllers\LessonResourceController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\PaymentController;
@@ -75,6 +78,8 @@ Route::get('courses/{slug}/reviews', [CourseReviewController::class, 'index']);
 Route::get('courses/{slug}/attachments', [LessonResourceController::class, 'forCourse']);
 Route::get('courses/{slug}', [CourseController::class, 'show']);
 Route::get('course-categories', [CourseCategoryController::class, 'index']);
+Route::get('instructors', [InstructorController::class, 'index']);
+Route::get('instructors/{id}', [InstructorController::class, 'show']);
 
 // Signed URL used by the video player for privately hosted lesson videos.
 Route::get('lessons/{lesson}/stream', [LessonController::class, 'stream'])
@@ -128,6 +133,17 @@ Route::group(['prefix' => 'admin'], function () {
 
         Route::get('analytics', [DashboardController::class, 'analytics']);
 
+        // Exams
+        Route::get('exams', [ExamAdminController::class, 'index']);
+        Route::get('exams/{id}', [ExamAdminController::class, 'show']);
+        Route::get('exams/{id}/attempts', [ExamAdminController::class, 'attempts']);
+        Route::post('exams/add', [ExamAdminController::class, 'store']);
+        Route::post('exams/update', [ExamAdminController::class, 'update']);
+        Route::delete('exams/delete/{id}', [ExamAdminController::class, 'destroy']);
+        Route::post('exam-questions/add', [ExamAdminController::class, 'storeQuestion']);
+        Route::post('exam-questions/update', [ExamAdminController::class, 'updateQuestion']);
+        Route::delete('exam-questions/delete/{id}', [ExamAdminController::class, 'destroyQuestion']);
+
         Route::get('lessons/{lessonId}/resources', [LessonResourceController::class, 'index']);
         Route::get('courses/{courseId}/attachments', [LessonResourceController::class, 'courseIndex']);
         Route::post('lesson-resources/add', [LessonResourceController::class, 'store']);
@@ -139,6 +155,7 @@ Route::group(['prefix' => 'admin'], function () {
             Route::get('users', [AuthController::class, 'getUsers']);
             Route::post('users/add', [AuthController::class, 'addUser']);
             Route::post('users/update', [AuthController::class, 'updateUser']);
+            Route::post('users/{id}/avatar', [AuthController::class, 'uploadAvatar']);
             Route::delete('users/delete/{id}', [AuthController::class, 'deleteUser']);
 
             Route::post('categories/add', [CategoryController::class, 'addCategory']);
@@ -256,6 +273,15 @@ Route::group(['middleware' => 'auth:sanctum'], function () {
     Route::get('my/courses/{slug}/learn', [LessonController::class, 'learning']);
     Route::get('my/certificates', [CertificateController::class, 'mine']);
     Route::get('my/dashboard', [DashboardController::class, 'student']);
+
+    // Exams (timed, auto-marked, optional negative marking)
+    Route::get('exams', [ExamController::class, 'index']);
+    Route::get('exams/{id}', [ExamController::class, 'show']);
+    Route::get('exams/{id}/attempts', [ExamController::class, 'myAttempts']);
+    Route::post('exams/{id}/start', [ExamController::class, 'start'])->middleware('throttle:sensitive');
+    Route::get('exam-attempts/{id}', [ExamController::class, 'attempt']);
+    Route::post('exam-attempts/{id}/answers', [ExamController::class, 'saveAnswers'])->middleware('throttle:cart');
+    Route::post('exam-attempts/{id}/submit', [ExamController::class, 'submit'])->middleware('throttle:sensitive');
     Route::get('my/payments', [PaymentController::class, 'mine']);
     Route::post('orders/{id}/pay', [PaymentController::class, 'pay'])->middleware('throttle:sensitive');
     Route::get('lesson-resources/{id}/download', [LessonResourceController::class, 'download']);

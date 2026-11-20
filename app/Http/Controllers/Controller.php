@@ -22,6 +22,12 @@ class Controller extends BaseController
         return $user->isAdmin() || ($user->isInstructor() && (int) $course->instructor_id === $user->id);
     }
 
+    /** A real HTTP 404 (the legacy error() helper answers 200). */
+    protected function notFound(string $message = 'Not found')
+    {
+        return response()->json(['status' => false, 'message' => $message, 'data' => []], 404);
+    }
+
     protected function forbidden()
     {
         return response()->json(['status' => false, 'message' => 'You are not allowed to manage this course', 'data' => []], 403);

@@ -466,4 +466,63 @@ class LmsBackendTest extends TestCase
         $this->deleteJson('api/admin/users/delete/'.$created['id'])->assertOk()->assertJsonPath('status', true);
         $this->deleteJson('api/admin/users/delete/99999')->assertOk()->assertJsonPath('status', false);
     }
+
+    public function test_public_instructor_directory(): void
+    {
+        $shown = User::factory()->create(['type' => 'instructor', 'name' => 'Shown', 'headline' => 'Physics', 'bio' => 'Bio']);
+        $noCourses = User::factory()->create(['type' => 'instructor']);
+        $inactive = User::factory()->create(['type' => 'instructor', 'is_active' => false]);
+        $draftOnly = User::factory()->create(['type' => 'instructor']);
+
+        $this->course(['instructor_id' => $shown->id, 'total_students' => 7]);
+        $this->course(['instructor_id' => $inactive->id]);
+        $this->course(['instructor_id' => $draftOnly->id, 'status' => 'draft']);
+
+        $list = $this->getJson('api/instructors')->assertOk()->json('data');
+        // Active instructors are listed even before their first published course; inactive ones never.
+        $this->assertCount(3, $list);
+        $this->assertSame('Shown', $list[0]['name']);
+        $this->assertNotContains($inactive->id, array_column($list, 'id'));
+        $this->assertSame(7, $list[0]['students_count']);
+        $this->assertArrayNotHasKey('email', $list[0]);
+
+        $profile = $this->getJson('api/instructors/'.$shown->id)->assertOk()->json('data');
+        $this->assertCount(1, $profile['courses']);
+
+        $this->getJson('api/instructors/'.$noCourses->id)->assertOk(); // active instructor profile still exists
+        $this->getJson('api/instructors/'.$inactive->id)->assertStatus(404);
+        $this->getJson('api/instructors/'.$this->student->id)->assertStatus(404);
+    }
+
+    public function test_admin_can_upload_an_instructor_photo(): void
+    {
+        $instructor = User::factory()->create(['type' => 'instructor']);
+
+        Sanctum::actingAs($this->admin);
+        $this->postJson('api/admin/users/'.$instructor->id.'/avatar', ['avatar' => \Illuminate\Http\UploadedFile::fake()->createWithContent('me.png', base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='))])
+            ->assertOk();
+
+        $path = $instructor->fresh()->avatar;
+        $this->assertStringStartsWith('images/avatars/', $path);
+        @unlink(public_path($path));
+
+        $this->postJson('api/admin/users/'.$instructor->id.'/avatar', ['avatar' => \Illuminate\Http\UploadedFile::fake()->create('x.php', 1)])->assertStatus(422);
+    }
+
+    public function test_every_course_payload_carries_its_instructor(): void
+    {
+        $teacher = User::factory()->create(['type' => 'instructor', 'name' => 'Ms Teacher', 'headline' => 'IELTS']);
+        $course = $this->course(['instructor_id' => $teacher->id]);
+        Enrollment::create(['user_id' => $this->student->id, 'course_id' => $course->id, 'source' => 'manual', 'status' => 'active', 'enrolled_at' => now(), 'expires_at' => now()->addDays(3)]);
+
+        $this->getJson('api/courses')->assertOk()->assertJsonPath('data.data.0.instructor.name', 'Ms Teacher');
+        $this->getJson('api/courses/'.$course->slug)->assertOk()->assertJsonPath('data.instructor.id', $teacher->id);
+        $this->getJson('api/instructors/'.$teacher->id)->assertOk()->assertJsonPath('data.courses.0.instructor.name', 'Ms Teacher');
+
+        Sanctum::actingAs($this->student);
+        $this->getJson('api/my/courses')->assertOk()->assertJsonPath('data.0.course.instructor.name', 'Ms Teacher');
+
+        $teacher->forceFill(['is_active' => false])->save();
+        $this->getJson('api/courses/'.$course->slug)->assertJsonPath('data.instructor', null);
+    }
 }

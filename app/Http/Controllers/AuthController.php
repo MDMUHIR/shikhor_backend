@@ -102,6 +102,8 @@ class AuthController extends Controller
             'password' => 'required|string|min:6',
             'type' => 'required|in:customer,admin,super_admin,instructor',
             'is_active' => 'nullable|boolean',
+            'headline' => 'nullable|string|max:255',
+            'bio' => 'nullable|string|max:1000',
         ]);
 
         $user = new User([
@@ -109,6 +111,8 @@ class AuthController extends Controller
             'email' => $request->email,
             'password' => Hash::make($request->password),
             'type' => $request->type,
+            'headline' => $request->headline,
+            'bio' => $request->bio,
         ]);
         $user->is_active = $request->has('is_active') ? $request->boolean('is_active') : true;
 
@@ -156,6 +160,33 @@ class AuthController extends Controller
         return $this->success('User deleted successfully', null);
     }
 
+    /** Profile photo for an account (shown on the public instructor pages). */
+    public function uploadAvatar(Request $request, $id)
+    {
+        $request->validate(['avatar' => 'required|image|mimes:jpg,jpeg,png,webp|max:2048']);
+
+        $user = User::find($id);
+
+        if (! $user) {
+            return $this->error('User not found', 404);
+        }
+
+        $dir = public_path('images/avatars');
+
+        if (! is_dir($dir)) {
+            mkdir($dir, 0775, true);
+        }
+
+        $file = $request->file('avatar');
+        $name = $user->id.'-'.bin2hex(random_bytes(6)).'.'.$file->extension();
+        $file->move($dir, $name);
+
+        $user->avatar = 'images/avatars/'.$name;
+        $user->save();
+
+        return $this->success('Photo updated successfully', $user);
+    }
+
     public function updateUser(Request $request)
     {
         $this->validate($request, [
@@ -165,6 +196,8 @@ class AuthController extends Controller
             'type' => 'required|in:customer,admin,super_admin,instructor',
             'password' => 'nullable|string|min:6',
             'is_active' => 'nullable|boolean',
+            'headline' => 'nullable|string|max:255',
+            'bio' => 'nullable|string|max:1000',
         ]);
 
         $user = User::find($request->id);
@@ -181,6 +214,14 @@ class AuthController extends Controller
         $user->name = $request->name;
         $user->email = $request->email;
         $user->type = $request->type;
+
+        if ($request->has('headline')) {
+            $user->headline = $request->headline;
+        }
+
+        if ($request->has('bio')) {
+            $user->bio = $request->bio;
+        }
 
         if ($request->has('is_active')) {
             $user->is_active = $request->boolean('is_active');
