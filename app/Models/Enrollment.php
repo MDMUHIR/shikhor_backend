@@ -18,12 +18,23 @@ class Enrollment extends Model
         'enrolled_at',
         'starts_at',
         'expires_at',
+        'completed_at',
+        'progress_percentage',
+        'last_lesson_id',
+        'last_accessed_at',
+        'certificate_eligible',
     ];
+
+    public const STATUSES = ['active', 'completed', 'expired', 'suspended', 'cancelled'];
 
     protected $casts = [
         'enrolled_at' => 'datetime',
         'starts_at' => 'datetime',
         'expires_at' => 'datetime',
+        'completed_at' => 'datetime',
+        'last_accessed_at' => 'datetime',
+        'progress_percentage' => 'decimal:2',
+        'certificate_eligible' => 'boolean',
     ];
 
     public function user()
@@ -36,6 +47,11 @@ class Enrollment extends Model
         return $this->belongsTo(Course::class);
     }
 
+    public function lastLesson()
+    {
+        return $this->belongsTo(Lesson::class, 'last_lesson_id');
+    }
+
     public function order()
     {
         return $this->belongsTo(Order::class);
@@ -43,7 +59,7 @@ class Enrollment extends Model
 
     public function scopeActive($query)
     {
-        return $query->where('status', 'active')
+        return $query->whereIn('status', ['active', 'completed'])
             ->where(function ($q) {
                 $q->whereNull('starts_at')->orWhere('starts_at', '<=', now());
             })
@@ -54,7 +70,7 @@ class Enrollment extends Model
 
     public function isActive(): bool
     {
-        return $this->status === 'active'
+        return in_array($this->status, ['active', 'completed'], true)
             && ($this->starts_at === null || $this->starts_at->isPast() || $this->starts_at->equalTo(now()))
             && ($this->expires_at === null || $this->expires_at->isFuture());
     }

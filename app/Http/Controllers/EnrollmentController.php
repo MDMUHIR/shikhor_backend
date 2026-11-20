@@ -43,7 +43,7 @@ class EnrollmentController extends Controller
                 return null;
             }
 
-            $progress = $enrollment->status === 'active'
+            $progress = in_array($enrollment->status, ['active', 'completed'], true)
                 ? $this->access->progress($user, $course)
                 : null;
 
@@ -131,6 +131,11 @@ class EnrollmentController extends Controller
             $query->where('status', $request->status);
         }
 
+        if ($request->filled('search')) {
+            $term = '%'.$request->search.'%';
+            $query->whereHas('user', fn ($q) => $q->where('name', 'like', $term)->orWhere('email', 'like', $term));
+        }
+
         $perPage = min(max((int) $request->query('per_page', 20), 1), 100);
         $enrollments = $query->latest('id')->paginate($perPage)->withQueryString();
 
@@ -185,6 +190,13 @@ class EnrollmentController extends Controller
             'manual'
         );
 
+        $user->notify(new \App\Notifications\LmsNotification(
+            'course_enrolled',
+            'You are enrolled',
+            'You now have access to "'.$course->title.'".',
+            ['course_id' => $course->id, 'slug' => $course->slug]
+        ));
+
         return $this->success('Course access granted successfully', [
             'id' => $enrollment->id,
             'user_id' => $enrollment->user_id,
@@ -209,7 +221,8 @@ class EnrollmentController extends Controller
             : Carbon::now();
 
         $enrollment->forceFill([
-            'status' => 'active',
+            // Extending never revives a cancelled/suspended enrollment (use reactivate for that).
+            'status' => $enrollment->status === 'expired' ? 'active' : $enrollment->status,
             'expires_at' => $base->addDays((int) $request->days),
         ])->save();
 
@@ -228,7 +241,8 @@ class EnrollmentController extends Controller
             return $this->error('Enrollment not found', 404);
         }
 
-        $enrollment->forceFill(['status' => 'revoked'])->save();
+        $enrollment->forceFill(['status' => 'cancelled'])->save();
+        $enrollment->course?->refreshStudentCount();
 
         return $this->success('Enrollment revoked successfully', [
             'id' => $enrollment->id,
@@ -248,7 +262,8 @@ class EnrollmentController extends Controller
             return $this->error('This enrollment has expired, extend it instead');
         }
 
-        $enrollment->forceFill(['status' => 'active'])->save();
+        $enrollment->forceFill(['status' => $enrollment->completed_at ? 'completed' : 'active'])->save();
+        $enrollment->course?->refreshStudentCount();
 
         return $this->success('Enrollment reactivated successfully', [
             'id' => $enrollment->id,

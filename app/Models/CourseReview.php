@@ -16,7 +16,11 @@ class CourseReview extends Model
         'title',
         'comment',
         'is_approved',
+        'status',
+        'helpful_count',
     ];
+
+    public const STATUSES = ['pending', 'approved', 'rejected', 'hidden'];
 
     protected $casts = [
         'rating' => 'integer',

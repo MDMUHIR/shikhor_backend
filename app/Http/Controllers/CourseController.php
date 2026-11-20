@@ -5,18 +5,86 @@ namespace App\Http\Controllers;
 use App\Models\Course;
 use App\Models\Lesson;
 use App\Services\CourseFormatter;
+use App\Services\VideoUrlService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class CourseController extends Controller
 {
-    public function __construct(private readonly CourseFormatter $formatter)
+    public function __construct(
+        private readonly CourseFormatter $formatter,
+        private readonly VideoUrlService $videos
+    ) {
+    }
+
+    /** Extra rules shared by create & update. */
+    private function extraRules(): array
     {
+        return [
+            'instructor_id' => 'nullable|exists:users,id',
+            'short_description' => 'nullable|string|max:500',
+            'banner' => 'nullable|string|max:2048',
+            'discount_starts_at' => 'nullable|date',
+            'discount_ends_at' => 'nullable|date|after_or_equal:discount_starts_at',
+            'estimated_completion_minutes' => 'nullable|integer|min:0',
+            'target_audience' => 'nullable|array',
+            'tags' => 'nullable|array|max:20',
+            'tags.*' => 'string|max:50',
+            'certificate_enabled' => 'nullable|boolean',
+            'completion_percentage_required' => 'nullable|integer|min:1|max:100',
+            'require_quizzes_passed' => 'nullable|boolean',
+            'seo_title' => 'nullable|string|max:255',
+            'seo_description' => 'nullable|string|max:500',
+            'seo_meta' => 'nullable|array',
+        ];
+    }
+
+    private function extraPayload(Request $request, ?Course $course = null): array
+    {
+        $user = $request->user();
+        $data = [];
+
+        foreach (['short_description', 'banner', 'discount_starts_at', 'discount_ends_at', 'estimated_completion_minutes', 'target_audience', 'tags', 'seo_title', 'seo_description', 'seo_meta'] as $field) {
+            if ($request->has($field) || ! $course) {
+                $data[$field] = $request->input($field);
+            }
+        }
+
+        foreach (['certificate_enabled' => true, 'require_quizzes_passed' => true] as $field => $default) {
+            $data[$field] = $request->has($field) ? $request->boolean($field) : ($course ? $course->{$field} : $default);
+        }
+
+        if ($request->has('completion_percentage_required') || ! $course) {
+            $data['completion_percentage_required'] = (int) $request->input('completion_percentage_required', 100);
+        }
+
+        // Instructors always own what they create; only admins can assign instructors.
+        if ($user->isAdmin()) {
+            if ($request->has('instructor_id')) {
+                $data['instructor_id'] = $request->instructor_id;
+            }
+        } elseif (! $course) {
+            $data['instructor_id'] = $user->id;
+        }
+
+        // Promo video: YouTube or any https URL; stored with its detected source.
+        if ($request->has('promo_video_url')) {
+            $url = $request->promo_video_url;
+            $data['promo_video_source'] = $url ? ($this->videos->youtubeId($url) ? 'youtube' : 'external') : null;
+        }
+
+        return $data;
+    }
+
+    /** Instructors cannot self-publish: their "published" requests go to review. */
+    private function resolveStatus(Request $request, string $status): string
+    {
+        return ($status === 'published' && ! $request->user()->isAdmin()) ? 'under_review' : $status;
     }
 
     public function index(Request $request)
     {
-        $query = Course::query()->published()->with('category');
+        $query = Course::query()->published()->with(['category', 'instructor:id,name,bio,avatar']);
 
         $this->applyFilters($query, $request);
 
@@ -34,7 +102,7 @@ class CourseController extends Controller
         $course = Course::query()
             ->published()
             ->with([
-                'category',
+                'category', 'instructor:id,name,bio,avatar',
                 'sections.lessons' => fn ($query) => $query->where('is_published', true),
             ])
             ->where('slug', $slug)
@@ -72,7 +140,11 @@ class CourseController extends Controller
 
     public function adminIndex(Request $request)
     {
-        $query = Course::query()->with('category');
+        $query = Course::query()->with(['category', 'instructor:id,name,bio,avatar']);
+
+        if (! $request->user()->isAdmin()) {
+            $query->where('instructor_id', $request->user()->id);
+        }
 
         if ($request->filled('search')) {
             $term = '%'.$request->search.'%';
@@ -98,6 +170,7 @@ class CourseController extends Controller
 
     public function adminShow($id)
     {
+        if ($d = $this->denyCourse($id)) { return $d; }
         $course = Course::query()
             ->with([
                 'category',
@@ -146,28 +219,28 @@ class CourseController extends Controller
 
     public function store(Request $request)
     {
-        $request->validate([
+        $request->validate(array_merge($this->extraRules(), [
             'course_category_id' => 'nullable|exists:course_categories,id',
             'title' => 'required|string|max:255',
             'slug' => 'nullable|string|max:255|unique:courses,slug',
             'subtitle' => 'nullable|string|max:255',
             'description' => 'nullable|string',
             'thumbnail' => 'nullable',
-            'promo_video_url' => 'nullable|url',
+            'promo_video_url' => ['nullable', 'url:https', 'max:2048'],
             'level' => 'nullable|in:all,beginner,intermediate,advanced',
             'language' => 'nullable|string|max:50',
             'price' => 'nullable|numeric|min:0',
-            'offer_price' => 'nullable|numeric|min:0',
+            'offer_price' => 'nullable|numeric|min:0|lte:price',
             'access_days' => 'nullable|integer|min:0',
-            'status' => 'nullable|in:draft,published,archived',
+            'status' => 'nullable|in:'.implode(',', Course::STATUSES),
             'is_featured' => 'nullable|boolean',
             'requirements' => 'nullable|array',
             'outcomes' => 'nullable|array',
-        ]);
+        ]));
 
-        $status = $request->input('status', 'draft');
+        $status = $this->resolveStatus($request, $request->input('status', 'draft'));
 
-        $course = Course::create([
+        $course = Course::create($this->extraPayload($request) + [
             'course_category_id' => $request->course_category_id,
             'title' => $request->title,
             'slug' => $request->filled('slug') ? Str::slug($request->slug) : Course::uniqueSlug($request->title),
@@ -195,7 +268,8 @@ class CourseController extends Controller
 
     public function update(Request $request)
     {
-        $request->validate([
+        if ($d = $this->denyCourse($request->id)) { return $d; }
+        $request->validate(array_merge($this->extraRules(), [
             'id' => 'required|exists:courses,id',
             'course_category_id' => 'nullable|exists:course_categories,id',
             'title' => 'required|string|max:255',
@@ -203,17 +277,17 @@ class CourseController extends Controller
             'subtitle' => 'nullable|string|max:255',
             'description' => 'nullable|string',
             'thumbnail' => 'nullable',
-            'promo_video_url' => 'nullable|url',
+            'promo_video_url' => ['nullable', 'url:https', 'max:2048'],
             'level' => 'nullable|in:all,beginner,intermediate,advanced',
             'language' => 'nullable|string|max:50',
             'price' => 'nullable|numeric|min:0',
-            'offer_price' => 'nullable|numeric|min:0',
+            'offer_price' => 'nullable|numeric|min:0|lte:price',
             'access_days' => 'nullable|integer|min:0',
-            'status' => 'nullable|in:draft,published,archived',
+            'status' => 'nullable|in:'.implode(',', Course::STATUSES),
             'is_featured' => 'nullable|boolean',
             'requirements' => 'nullable|array',
             'outcomes' => 'nullable|array',
-        ]);
+        ]));
 
         $course = Course::findOrFail($request->id);
         $wasPublished = $course->published_at !== null;
@@ -231,11 +305,18 @@ class CourseController extends Controller
             'price' => $request->input('price', $course->price),
             'offer_price' => $request->has('offer_price') ? $request->offer_price : $course->offer_price,
             'access_days' => $request->has('access_days') ? (int) $request->access_days : $course->access_days,
-            'status' => $request->input('status', $course->status),
+            'status' => $this->resolveStatus($request, $request->input('status', $course->status)),
             'is_featured' => $request->has('is_featured') ? $request->boolean('is_featured') : $course->is_featured,
             'requirements' => $request->has('requirements') ? $request->requirements : $course->requirements,
             'outcomes' => $request->has('outcomes') ? $request->outcomes : $course->outcomes,
         ];
+
+        $payload += $this->extraPayload($request, $course);
+
+        // Non-admins can never lift a course out of an unpublished state on their own.
+        if (! $request->user()->isAdmin() && $course->status === 'published' && $payload['status'] === 'under_review') {
+            $payload['status'] = 'published';
+        }
 
         if ($payload['status'] === 'published' && ! $wasPublished) {
             $payload['published_at'] = now();
@@ -251,6 +332,7 @@ class CourseController extends Controller
 
     public function destroy($id)
     {
+        if ($d = $this->denyCourse($id)) { return $d; }
         $course = Course::find($id);
 
         if (! $course) {

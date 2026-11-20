@@ -26,6 +26,20 @@ class CourseFormatter
             'price' => (float) $course->price,
             'offer_price' => $course->offer_price !== null ? (float) $course->offer_price : null,
             'effective_price' => $course->effective_price,
+            'discount_active' => $course->discountIsActive(),
+            'discount_ends_at' => $course->discount_ends_at?->toIso8601String(),
+            'is_free' => $course->isFree(),
+            'short_description' => $course->short_description,
+            'banner' => $course->banner,
+            'promo_video_source' => $course->promo_video_source,
+            'instructor' => $course->relationLoaded('instructor') && $course->instructor ? ['id' => $course->instructor->id, 'name' => $course->instructor->name, 'bio' => $course->instructor->bio, 'avatar' => $course->instructor->avatar] : null,
+            'instructor_id' => $course->instructor_id,
+            'tags' => $course->tags ?? [],
+            'target_audience' => $course->target_audience ?? [],
+            'certificate_enabled' => (bool) $course->certificate_enabled,
+            'completion_percentage_required' => (int) $course->completion_percentage_required,
+            'total_sections' => (int) $course->total_sections,
+            'seo' => ['title' => $course->seo_title, 'description' => $course->seo_description, 'meta' => $course->seo_meta],
             'access_days' => $course->access_days,
             'effective_access_days' => $course->access_days ?? (int) config('courses.default_access_days', 365),
             'access_type' => $course->access_days === 0 ? 'lifetime' : 'time_limited',
@@ -79,7 +93,22 @@ class CourseFormatter
             'is_locked' => ! $hasAccess && ! $lesson->is_preview,
             'is_completed' => $progress?->completed_at !== null,
             'last_position_seconds' => (int) ($progress?->last_position_seconds ?? 0),
+            'is_required' => (bool) $lesson->is_required,
         ];
+
+        if ($hasAccess || $lesson->is_preview) {
+            $data['resources'] = $lesson->resources
+                ->where('is_downloadable', true)
+                ->map(fn ($r) => [
+                    'id' => $r->id,
+                    'title' => $r->title,
+                    'kind' => $r->kind,
+                    'mime_type' => $r->mime_type,
+                    'size' => $r->size,
+                    'external_url' => $r->external_url,
+                    'download_url' => $r->path ? url('api/lesson-resources/'.$r->id.'/download') : null,
+                ])->values()->all();
+        }
 
         if ($lesson->type === 'text' && ($hasAccess || $lesson->is_preview)) {
             $data['content'] = $lesson->content;
@@ -116,6 +145,12 @@ class CourseFormatter
             'video_source' => $lesson->video_source,
             'video_url' => $lesson->video_url,
             'video_path' => $lesson->video_path,
+            'video_external_id' => $lesson->video_external_id,
+            'video_mime' => $lesson->video_mime,
+            'video_size' => $lesson->video_size,
+            'video_status' => $lesson->video_status,
+            'completion_threshold' => $lesson->completion_threshold,
+            'is_required' => $lesson->is_required,
             'duration_seconds' => $lesson->duration_seconds,
             'content' => $lesson->content,
             'is_preview' => $lesson->is_preview,
@@ -133,6 +168,15 @@ class CourseFormatter
 
     public function videoPayload(Lesson $lesson, ?User $user = null, bool $hasAccess = false): ?array
     {
+        if ($lesson->video_source === 'youtube' && $lesson->video_external_id) {
+            return [
+                'source' => 'youtube',
+                'video_id' => $lesson->video_external_id,
+                'url' => 'https://www.youtube.com/watch?v='.$lesson->video_external_id,
+                'embed_url' => app(VideoUrlService::class)->youtubeEmbedUrl($lesson->video_external_id),
+            ];
+        }
+
         if ($lesson->video_source === 'external' && $lesson->video_url) {
             return [
                 'source' => 'external',
@@ -162,7 +206,7 @@ class CourseFormatter
 
     public function reviewSummary(Course $course): array
     {
-        $reviews = $course->reviews()->where('is_approved', true);
+        $reviews = $course->reviews()->where('status', 'approved');
 
         return [
             'average' => round((float) (clone $reviews)->avg('rating'), 2),

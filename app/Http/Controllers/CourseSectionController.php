@@ -10,6 +10,7 @@ class CourseSectionController extends Controller
 {
     public function index($courseId)
     {
+        if ($d = $this->denyCourse($courseId)) { return $d; }
         $course = Course::find($courseId);
 
         if (! $course) {
@@ -25,6 +26,7 @@ class CourseSectionController extends Controller
 
     public function store(Request $request)
     {
+        if ($d = $this->denyCourse($request->course_id)) { return $d; }
         $request->validate([
             'course_id' => 'required|exists:courses,id',
             'title' => 'required|string|max:255',
@@ -44,6 +46,7 @@ class CourseSectionController extends Controller
 
     public function update(Request $request)
     {
+        if ($d = $this->denySection($request->id)) { return $d; }
         $request->validate([
             'id' => 'required|exists:course_sections,id',
             'title' => 'required|string|max:255',
@@ -64,6 +67,7 @@ class CourseSectionController extends Controller
 
     public function destroy($id)
     {
+        if ($d = $this->denySection($id)) { return $d; }
         $section = CourseSection::find($id);
 
         if (! $section) {
@@ -84,6 +88,8 @@ class CourseSectionController extends Controller
         ]);
 
         foreach ($request->sections as $item) {
+            if ($d = $this->denySection($item['id'])) { return $d; }
+
             CourseSection::where('id', $item['id'])->update(['sort_order' => (int) $item['sort_order']]);
         }
 

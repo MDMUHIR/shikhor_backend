@@ -118,6 +118,12 @@ class CoursePlatformTest extends TestCase
         $this->assertSame(1, count($order['course_items']));
         $this->assertEquals(3500, $order['pricing']['total']);
 
+        $this->assertNull(Enrollment::where('user_id', $this->student->id)->first(), 'No access before payment');
+
+        Sanctum::actingAs($this->admin);
+        $this->postJson('api/admin/orders/'.$order['id'].'/confirm-payment', ['reference' => 'TXN-1'])->assertOk();
+        Sanctum::actingAs($this->student);
+
         $enrollment = Enrollment::where('user_id', $this->student->id)->first();
         $this->assertNotNull($enrollment);
         $this->assertTrue($enrollment->isActive());
@@ -236,16 +242,20 @@ class CoursePlatformTest extends TestCase
             'payment_method' => 'cash_on_delivery',
         ])->assertOk()->json('data');
 
-        $this->assertTrue(Enrollment::where('course_id', $course->id)->first()->isActive());
+        // Unpaid orders never grant access.
+        $this->assertNull(Enrollment::where('course_id', $course->id)->first());
 
         Sanctum::actingAs($this->admin);
+
+        $this->postJson('api/admin/orders/update', ['id' => $order['id'], 'payment_status' => 'paid'])->assertOk();
+        $this->assertTrue(Enrollment::where('course_id', $course->id)->first()->isActive());
 
         $this->postJson('api/admin/orders/update', [
             'id' => $order['id'],
             'status' => 'cancelled',
         ])->assertOk();
 
-        $this->assertSame('revoked', Enrollment::where('course_id', $course->id)->first()->status);
+        $this->assertSame('cancelled', Enrollment::where('course_id', $course->id)->first()->status);
     }
 
     public function test_enrollment_can_wait_for_payment_confirmation(): void

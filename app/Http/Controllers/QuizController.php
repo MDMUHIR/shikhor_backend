@@ -144,12 +144,26 @@ class QuizController extends Controller
         });
 
         if ($passed && $quiz->lesson) {
-            $this->access->markLessonComplete($user, $quiz->lesson);
+            $this->access->markLessonComplete($user, $quiz->lesson, null, false);
+        } else {
+            $this->access->syncEnrollment($user, $quiz->course, $quiz->lesson);
+        }
+
+        // Do not hand out the answer key until the student has passed or has no attempts left.
+        $attemptsLeft = $quiz->max_attempts === null ? null : max($quiz->max_attempts - ($completedAttempts + 1), 0);
+
+        if (! $passed && $attemptsLeft !== 0) {
+            $review = array_map(function ($row) {
+                unset($row['correct_answers']);
+
+                return $row;
+            }, $review);
         }
 
         return $this->success('Quiz submitted successfully', [
             'attempt' => $this->formatAttempt($attempt),
             'passed' => $passed,
+            'attempts_left' => $attemptsLeft,
             'review' => $review,
             'progress' => $this->access->progress($user, $quiz->course),
         ]);
@@ -199,6 +213,10 @@ class QuizController extends Controller
     {
         $query = Quiz::query()->withCount('questions');
 
+        if (! $request->user()->isAdmin()) {
+            $query->whereIn('course_id', \App\Models\Course::where('instructor_id', $request->user()->id)->pluck('id'));
+        }
+
         if ($request->filled('course_id')) {
             $query->where('course_id', $request->course_id);
         }
@@ -217,6 +235,7 @@ class QuizController extends Controller
 
     public function adminShow($id)
     {
+        if ($d = $this->denyQuiz($id)) { return $d; }
         $quiz = Quiz::with(['questions', 'course:id,title,slug'])->find($id);
 
         if (! $quiz) {
@@ -231,6 +250,7 @@ class QuizController extends Controller
 
     public function store(Request $request)
     {
+        if ($d = $this->denyCourse($request->course_id)) { return $d; }
         $request->validate([
             'course_id' => 'required|exists:courses,id',
             'lesson_id' => 'nullable|exists:lessons,id|unique:quizzes,lesson_id',
@@ -260,6 +280,7 @@ class QuizController extends Controller
 
     public function update(Request $request)
     {
+        if ($d = $this->denyQuiz($request->id)) { return $d; }
         $request->validate([
             'id' => 'required|exists:quizzes,id',
             'lesson_id' => 'nullable|exists:lessons,id|unique:quizzes,lesson_id,'.$request->id,
@@ -290,6 +311,7 @@ class QuizController extends Controller
 
     public function destroy($id)
     {
+        if ($d = $this->denyQuiz($id)) { return $d; }
         $quiz = Quiz::find($id);
 
         if (! $quiz) {
@@ -303,6 +325,7 @@ class QuizController extends Controller
 
     public function storeQuestion(Request $request)
     {
+        if ($d = $this->denyQuiz($request->quiz_id)) { return $d; }
         $rules = [
             'quiz_id' => 'required|exists:quizzes,id',
             'type' => 'nullable|in:single_choice,multiple_choice,true_false',
@@ -338,6 +361,7 @@ class QuizController extends Controller
 
     public function updateQuestion(Request $request)
     {
+        if ($d = $this->denyQuestion($request->id)) { return $d; }
         $request->validate([
             'id' => 'required|exists:quiz_questions,id',
             'type' => 'nullable|in:single_choice,multiple_choice,true_false',
@@ -371,6 +395,7 @@ class QuizController extends Controller
 
     public function destroyQuestion($id)
     {
+        if ($d = $this->denyQuestion($id)) { return $d; }
         $question = QuizQuestion::find($id);
 
         if (! $question) {

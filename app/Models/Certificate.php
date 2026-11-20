@@ -17,12 +17,17 @@ class Certificate extends Model
         'status',
         'issued_at',
         'revoked_at',
+        'completed_at',
+        'verification_token',
         'metadata',
     ];
+
+    protected $hidden = ['verification_token'];
 
     protected $casts = [
         'issued_at' => 'datetime',
         'revoked_at' => 'datetime',
+        'completed_at' => 'datetime',
         'metadata' => 'array',
     ];
 

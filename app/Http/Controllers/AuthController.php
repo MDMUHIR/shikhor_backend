@@ -15,7 +15,7 @@ class AuthController extends Controller
     {
         $request->validate([
             'name' => 'required|string',
-            'email' => 'required|string|unique:users',
+            'email' => 'required|string|email|unique:users',
             'password' => 'required|string',
         ]);
 
@@ -50,6 +50,13 @@ class AuthController extends Controller
         }
 
         $user = $request->user();
+
+        if ($user->is_active === false) {
+            Auth::guard('web')->logout();
+
+            return $this->error('This account has been deactivated');
+        }
+
         $tokenResult = $user->createToken('Personal Access Token');
         $token = $tokenResult->plainTextToken;
 
@@ -78,7 +85,7 @@ class AuthController extends Controller
 
     public function getUsers()
     {
-        $users = User::all();
+        $users = User::query()->orderByDesc('id')->get();
 
         return response()->json([
             'success' => true,
@@ -91,17 +98,19 @@ class AuthController extends Controller
     {
         $request->validate([
             'name' => 'required|string',
-            'email' => 'required|string|unique:users',
+            'email' => 'required|string|email|unique:users',
             'password' => 'required|string|min:6',
-            'type' => 'required|string', // Validate that type is required and must be a string
+            'type' => 'required|in:customer,admin,super_admin,instructor',
+            'is_active' => 'nullable|boolean',
         ]);
 
         $user = new User([
             'name' => $request->name,
             'email' => $request->email,
             'password' => Hash::make($request->password),
-            'type' => $request->type, // Assign the type to the user
+            'type' => $request->type,
         ]);
+        $user->is_active = $request->has('is_active') ? $request->boolean('is_active') : true;
 
         if ($user->save()) {
             return response()->json([
@@ -120,9 +129,31 @@ class AuthController extends Controller
     public function deleteUser(Request $request, $id)
     {
         $user = User::find($id);
+
+        if (! $user) {
+            return $this->error('User not found', 404);
+        }
+
+        if ($user->id === $request->user()->id) {
+            return $this->error('You cannot delete your own account');
+        }
+
+        // Deleting cascades to orders, payments and enrollments, so keep accounts with history.
+        $hasHistory = \App\Models\Order::where('user_id', $user->id)->exists()
+            || \App\Models\Enrollment::where('user_id', $user->id)->exists();
+
+        if ($hasHistory) {
+            return $this->error('This user has orders or enrollments. Deactivate the account instead of deleting it.');
+        }
+
+        if ($user->isInstructor() && \App\Models\Course::where('instructor_id', $user->id)->exists()) {
+            return $this->error('Reassign this instructor\'s courses before deleting the account');
+        }
+
+        $user->tokens()->delete();
         $user->delete();
 
-        return $this->success('User deleted successfully', $user);
+        return $this->success('User deleted successfully', null);
     }
 
     public function updateUser(Request $request)
@@ -131,8 +162,9 @@ class AuthController extends Controller
             'id' => 'required|exists:users,id', // Ensure that the user exists
             'name' => 'required|string',
             'email' => 'required|string|email|unique:users,email,'.$request->id,
-            'type' => 'required|string',
-            'password' => 'nullable|string|min:6', // Password is optional and should have a minimum length if provided
+            'type' => 'required|in:customer,admin,super_admin,instructor',
+            'password' => 'nullable|string|min:6',
+            'is_active' => 'nullable|boolean',
         ]);
 
         $user = User::find($request->id);
@@ -140,9 +172,23 @@ class AuthController extends Controller
             return $this->error('User not found', 404);
         }
 
+        $isSelf = $user->id === $request->user()->id;
+
+        if ($isSelf && ($request->type !== $user->type || ($request->has('is_active') && ! $request->boolean('is_active')))) {
+            return $this->error('You cannot change your own role or deactivate yourself');
+        }
+
         $user->name = $request->name;
         $user->email = $request->email;
         $user->type = $request->type;
+
+        if ($request->has('is_active')) {
+            $user->is_active = $request->boolean('is_active');
+
+            if (! $user->is_active) {
+                $user->tokens()->delete(); // sign them out everywhere
+            }
+        }
 
         // Update the password only if it is provided
         if ($request->filled('password')) {

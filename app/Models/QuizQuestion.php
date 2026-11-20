@@ -17,6 +17,7 @@ class QuizQuestion extends Model
         'correct_answers',
         'marks',
         'sort_order',
+        'explanation',
     ];
 
     protected $casts = [

@@ -36,6 +36,14 @@ class Order extends Model
         'total_quantity',
         'total',
         'notes',
+        'paid_at',
+        'refunded_amount',
+        'idempotency_key',
+    ];
+
+    protected $casts = [
+        'paid_at' => 'datetime',
+        'refunded_amount' => 'decimal:2',
     ];
 
     public function products()
@@ -59,6 +67,11 @@ class Order extends Model
     {
         return $this->belongsToMany(Course::class, 'order_courses', 'order_id', 'course_id')
             ->withPivot('name', 'slug', 'image', 'original_price', 'unit_price', 'discount', 'line_total', 'access_days');
+    }
+
+    public function payments()
+    {
+        return $this->hasMany(Payment::class);
     }
 
     public function statusHistories()

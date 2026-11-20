@@ -25,7 +25,16 @@ return [
     |
     */
 
-    'enroll_on_order_placement' => (bool) env('COURSE_ENROLL_ON_ORDER_PLACEMENT', true),
+    /*
+    | Enrollment mode
+    |--------------------------------------------------------------------------
+    | manual: a paid/approved order does NOT grant access; an admin must enroll the
+    |         student (POST admin/orders/{id}/enroll or admin/enrollments/grant).
+    | auto:   access is granted as soon as the payment is verified.
+    */
+    'enrollment_mode' => env('COURSE_ENROLLMENT_MODE', 'manual'),
+
+    'enroll_on_order_placement' => (bool) env('COURSE_ENROLL_ON_ORDER_PLACEMENT', false),
 
     /*
     |--------------------------------------------------------------------------
@@ -34,6 +43,8 @@ return [
     */
 
     'video_disk' => env('COURSE_VIDEO_DISK', 'local'),
+    // Disk for downloadable lesson files (keep private; use an s3 disk in production)
+    'resource_disk' => env('COURSE_RESOURCE_DISK', 'local'),
     'video_max_size_kb' => (int) env('COURSE_VIDEO_MAX_SIZE_KB', 524288),
 
     /*
@@ -58,5 +69,19 @@ return [
         'provider' => env('COURSE_CERTIFICATE_PROVIDER', 'Coaching Center'),
         'signature' => env('COURSE_CERTIFICATE_SIGNATURE', 'Director'),
     ],
+
+    'reviews' => [
+        // false = new/edited reviews wait for admin moderation
+        'auto_approve' => (bool) env('COURSE_REVIEWS_AUTO_APPROVE', true),
+    ],
+
+    'payments' => [
+        // providers: manual (admin confirms), stripe
+        'default_provider' => env('PAYMENT_PROVIDER', 'manual'),
+        'webhook_tolerance_seconds' => (int) env('PAYMENT_WEBHOOK_TOLERANCE', 300),
+        'frontend_url' => env('FRONTEND_URL', 'http://localhost:3000'),
+    ],
+
+    'certificate_completion_requires_quizzes' => true,
 
 ];

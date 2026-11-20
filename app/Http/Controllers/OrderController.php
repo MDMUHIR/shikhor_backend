@@ -13,18 +13,42 @@ use App\Models\OrderProduct;
 use App\Models\OrderStatusHistory;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Services\CouponService;
 use App\Services\CourseAccessService;
+use App\Services\PaymentService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
 {
-    public function __construct(private readonly CourseAccessService $access)
+    public function __construct(
+        private readonly CourseAccessService $access,
+        private readonly CouponService $coupons,
+        private readonly PaymentService $payments
+    ) {
+    }
+
+    /** Return the order created earlier with the same Idempotency-Key (double-click / retry safe). */
+    private function existingOrder(Request $request): ?Order
     {
+        $key = $request->header('Idempotency-Key');
+
+        if (! $key) {
+            return null;
+        }
+
+        return Order::with('items', 'courseItems', 'statusHistories')
+            ->where('user_id', $request->user()->id)
+            ->where('idempotency_key', substr($key, 0, 100))
+            ->first();
     }
 
     public function addOrder(Request $request)
     {
+        if ($existing = $this->existingOrder($request)) {
+            return $this->success('Order placed successfully', $this->formatOrder($existing));
+        }
+
         $cart = Cart::with(['product.images', 'variant.attributes'])
             ->where('user_id', $request->user()->id)
             ->where('is_selected', true)
@@ -90,6 +114,7 @@ class OrderController extends Controller
                         throw new \Exception('Course is not available: ' . $item->course_id);
                     }
 
+                    $this->guardNotEnrolled($request->user(), $course);
                     $this->createOrderCourseItem($order->id, $course);
                 }
 
@@ -101,9 +126,7 @@ class OrderController extends Controller
                     ->where('is_selected', true)
                     ->delete();
 
-                $this->updateOrderTotals($order, $request);
-
-                $this->syncOrderEnrollments($order);
+                $this->finalizeNewOrder($order, $request);
 
                 return $order;
             });
@@ -119,6 +142,10 @@ class OrderController extends Controller
 
     public function directOrder(Request $request)
     {
+        if ($existing = $this->existingOrder($request)) {
+            return $this->success('Order placed successfully', $this->formatOrder($existing));
+        }
+
         $items = $request->items;
         $courseIds = $request->input('course_ids', []);
 
@@ -170,7 +197,7 @@ class OrderController extends Controller
             }
 
             $variant = null;
-            $price = $item['price'] ?? null;
+            $price = null;
             $availableStock = null;
 
             if ($variantId) {
@@ -273,12 +300,11 @@ class OrderController extends Controller
                         throw new \Exception('Course is not available: ' . $course->id);
                     }
 
+                    $this->guardNotEnrolled($request->user(), $locked);
                     $this->createOrderCourseItem($order->id, $locked);
                 }
 
-                $this->updateOrderTotals($order, $request);
-
-                $this->syncOrderEnrollments($order);
+                $this->finalizeNewOrder($order, $request);
 
                 return $order;
             });
@@ -322,14 +348,53 @@ class OrderController extends Controller
         return $this->success('Order retrieved successfully', $this->formatOrder($order));
     }
 
+    /** Statuses an admin may set. "shipped" & co. exist only for store products; "enrolled" only for courses. */
+    private function allowedStatuses(Order $order): array
+    {
+        $hasProducts = $order->items->isNotEmpty();
+        $hasCourses = $order->courseItems->isNotEmpty();
+
+        $statuses = $hasCourses && ! $hasProducts
+            ? ['pending', 'confirmed', 'enrolled', 'cancelled']
+            : ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled', 'returned'];
+
+        // Never reject the order's current value (e.g. a refunded order being re-saved).
+        return array_values(array_unique([...$statuses, $order->status]));
+    }
+
     public function updateAdminOrder(Request $request)
     {
-        $order = Order::find($request->id);
+        $order = Order::with('items', 'courseItems')->find($request->id);
         if (!$order) {
             return $this->error('Order not found', 404);
         }
 
+        $request->validate([
+            'status' => ['nullable', \Illuminate\Validation\Rule::in($this->allowedStatuses($order))],
+            'payment_status' => 'nullable|in:pending,paid,failed,cancelled',
+        ]);
+
         $oldStatus = $order->status;
+
+        // 1. Payment first, so "paid + enrolled" can be saved in one go.
+        if ($request->input('payment_status') === 'paid' && $order->payment_status !== 'paid') {
+            $this->payments->confirmManually($order, $request->user(), $request->input('payment_reference'));
+            $order->refresh();
+        } elseif ($request->has('payment_status') && $request->payment_status !== 'paid' && $order->payment_status !== 'paid') {
+            $order->payment_status = $request->payment_status;
+            $order->save();
+        }
+
+        // 2. "Enrolled" actually grants access (and fails loudly when it cannot).
+        if ($request->input('status') === 'enrolled' && $oldStatus !== 'enrolled') {
+            try {
+                $this->payments->enrollOrder($order, $request->user());
+            } catch (\DomainException $e) {
+                return $this->error($e->getMessage());
+            }
+            $order->refresh();
+            $oldStatus = 'enrolled';
+        }
 
         if ($request->has('status')) {
             $order->status = $request->status;
@@ -337,11 +402,8 @@ class OrderController extends Controller
         if ($request->has('notes')) {
             $order->notes = $request->notes;
         }
-        if ($request->has('payment_status')) {
-            $order->payment_status = $request->payment_status;
-        }
-        if ($request->has('delivery_charge')) {
-            $order->delivery_charge = $request->delivery_charge;
+        if ($request->has('delivery_charge') && $order->items->isNotEmpty()) {
+            $order->delivery_charge = max(0, (float) $request->delivery_charge);
         }
         if ($request->has('shipping_method')) {
             $order->shipping_method = $request->shipping_method;
@@ -358,7 +420,6 @@ class OrderController extends Controller
                 'created_at' => now(),
             ]);
         }
-
         $products = $request->products;
         if ($products) {
             foreach ($products as $product) {
@@ -384,42 +445,79 @@ class OrderController extends Controller
     }
 
     /**
-     * Enroll or revoke course access based on the order status / payment status.
+     * Revoke course access when an order is cancelled/returned. Enrollment is only
+     * ever granted by a verified payment (PaymentService::fulfilOrder), never by status edits.
      */
     private function handleEnrollmentLifecycle(Order $order): void
     {
-        $order->loadMissing('courseItems');
+        $order->loadMissing('courseItems.course');
 
         if ($order->courseItems->isEmpty()) {
             return;
         }
 
-        $revokingStatuses = ['cancelled', 'refunded', 'returned'];
-
-        if (in_array($order->status, $revokingStatuses, true)) {
-            $this->access->revokeForOrder($order);
+        if (in_array($order->status, ['cancelled', 'returned', 'refunded'], true)) {
+            $this->payments->voidOrder($order);
 
             return;
         }
 
-        $enrollOnPlacement = (bool) config('courses.enroll_on_order_placement', true);
-        $isPaid = $order->payment_status === 'paid';
-
-        if ($enrollOnPlacement || $isPaid) {
+        if ($order->payment_status === 'paid' && config('courses.enrollment_mode', 'manual') === 'auto') {
             $this->access->ensureEnrollmentsForOrder($order);
         }
     }
 
-    /**
-     * Grant access when the order is placed (config controlled).
-     */
-    private function syncOrderEnrollments(Order $order): void
+    private function guardNotEnrolled($user, Course $course): void
     {
-        if (! (bool) config('courses.enroll_on_order_placement', true)) {
-            return;
+        if ($this->access->hasActiveAccess($user, $course)) {
+            throw new \Exception('You are already enrolled in "'.$course->title.'"');
+        }
+    }
+
+    /**
+     * Price the order from server data only, apply the coupon, and fulfil free orders.
+     */
+    private function finalizeNewOrder(Order $order, Request $request): void
+    {
+        $order->load('items', 'courseItems.course');
+
+        $productsSubtotal = (float) $order->items->sum('line_total');
+        $courseLines = $order->courseItems->map(fn ($item) => [
+            'course_id' => $item->course_id,
+            'category_id' => $item->course?->course_category_id,
+            'amount' => (float) $item->line_total,
+        ]);
+
+        $order->discount = 0;
+        $order->discount_type = 'fixed';
+
+        if ($order->coupon_code) {
+            $coupon = $this->coupons->find($order->coupon_code);
+
+            if (! $coupon) {
+                throw new \Exception('Invalid coupon code');
+            }
+
+            $result = $this->coupons->evaluate($coupon, $request->user(), $courseLines, $productsSubtotal);
+            $order->coupon_code = $coupon->code;
+            $order->discount = $result['discount'];
+            $this->coupons->redeem($order, $coupon, $result['discount']);
         }
 
-        $this->access->ensureEnrollmentsForOrder($order);
+        // Courses are digital: no delivery charge for course-only orders.
+        if ($order->items->isEmpty()) {
+            $order->delivery_charge = 0;
+        }
+
+        $order->save();
+        $this->updateOrderTotals($order, $request);
+
+        if ((float) $order->total <= 0) {
+            $this->payments->fulfilOrder($order->fresh(), null);
+        } elseif ((bool) config('courses.enroll_on_order_placement', false)) {
+            // Legacy/dev switch only: grants access before payment.
+            $this->access->ensureEnrollmentsForOrder($order);
+        }
     }
 
     private function createOrderCourseItem($orderId, Course $course): OrderCourse
@@ -440,8 +538,7 @@ class OrderController extends Controller
 
     private function createOrder(Request $request, $userId): Order
     {
-        $nextId = DB::table('orders')->max('id') + 1;
-        $orderNumber = 'ORD-' . now()->format('Ymd') . '-' . str_pad($nextId, 4, '0', STR_PAD_LEFT);
+        $orderNumber = 'ORD-' . now()->format('Ymd') . '-' . strtoupper(\Illuminate\Support\Str::random(8));
 
         $customer = $request->input('customer', []);
         $shippingAddress = $request->input('shipping_address', []);
@@ -469,11 +566,13 @@ class OrderController extends Controller
         $order->currency = $pricing['currency'] ?? 'BDT';
 
         $order->delivery_charge = $pricing['delivery_charge'] ?? $request->delivery_charge;
-        $order->discount_type = $pricing['discount_type'] ?? $request->discount_type;
-        $order->discount = $pricing['discount'] ?? $request->discount ?? 0;
+        // Discounts are never taken from the client; the coupon is validated server-side.
+        $order->discount_type = 'fixed';
+        $order->discount = 0;
+        $order->idempotency_key = $request->header('Idempotency-Key') ? substr($request->header('Idempotency-Key'), 0, 100) : null;
 
         $couponCode = $pricing['coupon_code'] ?? $request->coupon_code ?? $request->coupon;
-        $order->coupon_code = $couponCode;
+        $order->coupon_code = $couponCode ? trim((string) $couponCode) : null;
 
         $order->shipping_method = $shipping['method'] ?? $request->shipping_method;
         $order->estimated_delivery_days = $shipping['estimated_delivery_days'] ?? $request->estimated_delivery_days;
@@ -585,7 +684,15 @@ class OrderController extends Controller
             'stock_snapshot' => $item->stock_snapshot,
         ])->values()->toArray();
 
+        $enrolledCourseIds = \App\Models\Enrollment::query()
+            ->where('user_id', $order->user_id)
+            ->whereIn('course_id', $order->courseItems->pluck('course_id'))
+            ->whereIn('status', ['active', 'completed'])
+            ->pluck('course_id')
+            ->all();
+
         $courseItems = $order->courseItems->map(fn($item) => [
+            'enrolled' => in_array($item->course_id, $enrolledCourseIds, true),
             'id' => $item->id,
             'course_id' => $item->course_id,
             'name' => $item->name,
@@ -637,6 +744,7 @@ class OrderController extends Controller
                 'discount_type' => $order->discount_type,
                 'coupon_code' => $order->coupon_code,
                 'total' => (float) ($order->total ?? 0),
+                'refunded_amount' => (float) ($order->refunded_amount ?? 0),
             ],
             'shipping' => [
                 'method' => $order->shipping_method,
@@ -649,6 +757,7 @@ class OrderController extends Controller
             'items' => $items,
             'course_items' => $courseItems,
             'status_history' => $statusHistory,
+            'paid_at' => $order->paid_at?->toIso8601String(),
             'notes' => $order->notes,
             'created_at' => $order->created_at?->toIso8601String(),
             'updated_at' => $order->updated_at?->toIso8601String(),
@@ -663,6 +772,7 @@ class OrderController extends Controller
             'processing' => 'Processing',
             'shipped' => 'Shipped',
             'delivered' => 'Delivered',
+            'enrolled' => 'Enrolled',
             'cancelled' => 'Cancelled',
             'returned' => 'Returned',
             'refunded' => 'Refunded',

@@ -17,6 +17,10 @@ use App\Http\Controllers\EnrollmentController;
 use App\Http\Controllers\LessonController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\LessonResourceController;
+use App\Http\Controllers\NotificationController;
+use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\QuizController;
 use App\Http\Controllers\WishListController;
 use Illuminate\Http\Request;
@@ -68,6 +72,7 @@ Route::get('blog-tags', [BlogController::class, 'getBlogTags']);
 
 Route::get('courses', [CourseController::class, 'index']);
 Route::get('courses/{slug}/reviews', [CourseReviewController::class, 'index']);
+Route::get('courses/{slug}/attachments', [LessonResourceController::class, 'forCourse']);
 Route::get('courses/{slug}', [CourseController::class, 'show']);
 Route::get('course-categories', [CourseCategoryController::class, 'index']);
 
@@ -77,9 +82,58 @@ Route::get('lessons/{lesson}/stream', [LessonController::class, 'stream'])
     ->name('lessons.stream');
 
 // Public certificate verification.
-Route::get('certificates/verify/{number}', [CertificateController::class, 'verify']);
+Route::get('certificates/verify/{number}', [CertificateController::class, 'verify'])->middleware('throttle:60,1');
+
+// Payment gateway webhooks (signature verified, idempotent).
+Route::post('webhooks/payments/{provider}', [PaymentController::class, 'webhook'])->middleware('throttle:120,1');
 
 Route::group(['prefix' => 'admin'], function () {
+    // Course management: admins (everything) and instructors (own courses only).
+    Route::group(['middleware' => ['auth:sanctum', 'staff']], function () {
+        /*
+        | Course management
+        */
+
+        Route::get('course-categories', [CourseCategoryController::class, 'adminIndex']);
+
+        Route::get('courses', [CourseController::class, 'adminIndex']);
+        Route::get('courses/{id}', [CourseController::class, 'adminShow']);
+        Route::post('courses/add', [CourseController::class, 'store']);
+        Route::post('courses/update', [CourseController::class, 'update']);
+        Route::delete('courses/delete/{id}', [CourseController::class, 'destroy']);
+
+        Route::get('courses/{courseId}/sections', [CourseSectionController::class, 'index']);
+        Route::post('course-sections/add', [CourseSectionController::class, 'store']);
+        Route::post('course-sections/update', [CourseSectionController::class, 'update']);
+        Route::post('course-sections/reorder', [CourseSectionController::class, 'reorder']);
+        Route::delete('course-sections/delete/{id}', [CourseSectionController::class, 'destroy']);
+
+        Route::get('courses/{courseId}/lessons', [LessonController::class, 'adminIndex']);
+        Route::get('lessons/{id}', [LessonController::class, 'adminShow']);
+        Route::post('lessons/add', [LessonController::class, 'store']);
+        Route::post('lessons/update', [LessonController::class, 'update']);
+        Route::post('lessons/reorder', [LessonController::class, 'reorder']);
+        Route::delete('lessons/delete/{id}', [LessonController::class, 'destroy']);
+
+
+            Route::get('quizzes', [QuizController::class, 'adminIndex']);
+            Route::get('quizzes/{id}', [QuizController::class, 'adminShow']);
+            Route::post('quizzes/add', [QuizController::class, 'store']);
+            Route::post('quizzes/update', [QuizController::class, 'update']);
+            Route::delete('quizzes/delete/{id}', [QuizController::class, 'destroy']);
+            Route::post('quiz-questions/add', [QuizController::class, 'storeQuestion']);
+            Route::post('quiz-questions/update', [QuizController::class, 'updateQuestion']);
+            Route::delete('quiz-questions/delete/{id}', [QuizController::class, 'destroyQuestion']);
+
+
+        Route::get('analytics', [DashboardController::class, 'analytics']);
+
+        Route::get('lessons/{lessonId}/resources', [LessonResourceController::class, 'index']);
+        Route::get('courses/{courseId}/attachments', [LessonResourceController::class, 'courseIndex']);
+        Route::post('lesson-resources/add', [LessonResourceController::class, 'store']);
+        Route::delete('lesson-resources/delete/{id}', [LessonResourceController::class, 'destroy']);
+    });
+
     Route::group(['middleware' => 'auth:sanctum'], function () {
         Route::group(['middleware' => 'admin'], function () {
             Route::get('users', [AuthController::class, 'getUsers']);
@@ -134,34 +188,6 @@ Route::group(['prefix' => 'admin'], function () {
             Route::post('delivery-charges/update', [DeliveryChargeController::class, 'updateDeliveryCharge']);
             Route::delete('delivery-charges/delete/{id}', [DeliveryChargeController::class, 'deleteDeliveryCharge']);
 
-            /*
-            | Course management
-            */
-
-            Route::get('course-categories', [CourseCategoryController::class, 'adminIndex']);
-            Route::post('course-categories/add', [CourseCategoryController::class, 'store']);
-            Route::post('course-categories/update', [CourseCategoryController::class, 'update']);
-            Route::delete('course-categories/delete/{id}', [CourseCategoryController::class, 'destroy']);
-
-            Route::get('courses', [CourseController::class, 'adminIndex']);
-            Route::get('courses/{id}', [CourseController::class, 'adminShow']);
-            Route::post('courses/add', [CourseController::class, 'store']);
-            Route::post('courses/update', [CourseController::class, 'update']);
-            Route::delete('courses/delete/{id}', [CourseController::class, 'destroy']);
-
-            Route::get('courses/{courseId}/sections', [CourseSectionController::class, 'index']);
-            Route::post('course-sections/add', [CourseSectionController::class, 'store']);
-            Route::post('course-sections/update', [CourseSectionController::class, 'update']);
-            Route::post('course-sections/reorder', [CourseSectionController::class, 'reorder']);
-            Route::delete('course-sections/delete/{id}', [CourseSectionController::class, 'destroy']);
-
-            Route::get('courses/{courseId}/lessons', [LessonController::class, 'adminIndex']);
-            Route::get('lessons/{id}', [LessonController::class, 'adminShow']);
-            Route::post('lessons/add', [LessonController::class, 'store']);
-            Route::post('lessons/update', [LessonController::class, 'update']);
-            Route::post('lessons/reorder', [LessonController::class, 'reorder']);
-            Route::delete('lessons/delete/{id}', [LessonController::class, 'destroy']);
-
             Route::get('enrollments', [EnrollmentController::class, 'adminIndex']);
             Route::post('enrollments/grant', [EnrollmentController::class, 'grant']);
             Route::post('enrollments/extend', [EnrollmentController::class, 'extend']);
@@ -173,14 +199,15 @@ Route::group(['prefix' => 'admin'], function () {
             Route::post('reviews/{id}/reject', [CourseReviewController::class, 'reject']);
             Route::delete('reviews/delete/{id}', [CourseReviewController::class, 'adminDestroy']);
 
-            Route::get('quizzes', [QuizController::class, 'adminIndex']);
-            Route::get('quizzes/{id}', [QuizController::class, 'adminShow']);
-            Route::post('quizzes/add', [QuizController::class, 'store']);
-            Route::post('quizzes/update', [QuizController::class, 'update']);
-            Route::delete('quizzes/delete/{id}', [QuizController::class, 'destroy']);
-            Route::post('quiz-questions/add', [QuizController::class, 'storeQuestion']);
-            Route::post('quiz-questions/update', [QuizController::class, 'updateQuestion']);
-            Route::delete('quiz-questions/delete/{id}', [QuizController::class, 'destroyQuestion']);
+            Route::post('course-categories/add', [CourseCategoryController::class, 'store']);
+            Route::post('course-categories/update', [CourseCategoryController::class, 'update']);
+            Route::delete('course-categories/delete/{id}', [CourseCategoryController::class, 'destroy']);
+
+            Route::get('payments', [PaymentController::class, 'adminIndex']);
+            Route::get('payments/{id}', [PaymentController::class, 'adminShow']);
+            Route::post('orders/{orderId}/enroll', [PaymentController::class, 'enroll']);
+            Route::post('orders/{orderId}/confirm-payment', [PaymentController::class, 'confirm']);
+            Route::post('payments/{id}/refund', [PaymentController::class, 'refund']);
 
             Route::get('certificates', [CertificateController::class, 'adminIndex']);
             Route::post('certificates/revoke/{id}', [CertificateController::class, 'revoke']);
@@ -228,6 +255,14 @@ Route::group(['middleware' => 'auth:sanctum'], function () {
     Route::get('my/courses/{slug}', [EnrollmentController::class, 'show']);
     Route::get('my/courses/{slug}/learn', [LessonController::class, 'learning']);
     Route::get('my/certificates', [CertificateController::class, 'mine']);
+    Route::get('my/dashboard', [DashboardController::class, 'student']);
+    Route::get('my/payments', [PaymentController::class, 'mine']);
+    Route::post('orders/{id}/pay', [PaymentController::class, 'pay'])->middleware('throttle:sensitive');
+    Route::get('lesson-resources/{id}/download', [LessonResourceController::class, 'download']);
+
+    Route::get('notifications', [NotificationController::class, 'index']);
+    Route::post('notifications/read-all', [NotificationController::class, 'readAll']);
+    Route::post('notifications/{id}/read', [NotificationController::class, 'read']);
 
     Route::get('lessons/{id}', [LessonController::class, 'show']);
     Route::post('lessons/{id}/complete', [LessonController::class, 'complete']);

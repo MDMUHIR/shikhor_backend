@@ -33,7 +33,7 @@ class CourseReviewController extends Controller
         $perPage = min(max((int) $request->query('per_page', 10), 1), 100);
 
         $reviews = $course->reviews()
-            ->where('is_approved', true)
+            ->where('status', 'approved')
             ->with('user:id,name')
             ->when($request->filled('rating'), fn ($query) => $query->where('rating', (int) $request->rating))
             ->latest('id')
@@ -93,6 +93,8 @@ class CourseReviewController extends Controller
             return $this->error('Only enrolled students can review this course');
         }
 
+        $status = config('courses.reviews.auto_approve', true) ? 'approved' : 'pending';
+
         $review = CourseReview::query()->updateOrCreate(
             [
                 'course_id' => $course->id,
@@ -102,7 +104,8 @@ class CourseReviewController extends Controller
                 'rating' => (int) $request->rating,
                 'title' => $request->title,
                 'comment' => $request->comment,
-                'is_approved' => true,
+                'status' => $status,
+                'is_approved' => $status === 'approved',
             ]
         );
 
@@ -153,7 +156,7 @@ class CourseReviewController extends Controller
         }
 
         if ($request->has('is_approved')) {
-            $query->where('is_approved', $request->boolean('is_approved'));
+            $query->where('status', $request->boolean('is_approved') ? 'approved' : 'rejected');
         }
 
         if ($request->filled('rating')) {
@@ -178,7 +181,7 @@ class CourseReviewController extends Controller
             return $this->error('Review not found', 404);
         }
 
-        $review->forceFill(['is_approved' => true])->save();
+        $review->forceFill(['status' => 'approved', 'is_approved' => true])->save();
         $review->course?->refreshRating();
 
         return $this->success('Review approved successfully', $this->format($review->fresh('user:id,name')));
@@ -192,7 +195,7 @@ class CourseReviewController extends Controller
             return $this->error('Review not found', 404);
         }
 
-        $review->forceFill(['is_approved' => false])->save();
+        $review->forceFill(['status' => 'rejected', 'is_approved' => false])->save();
         $review->course?->refreshRating();
 
         return $this->success('Review rejected successfully', $this->format($review->fresh('user:id,name')));
@@ -221,7 +224,7 @@ class CourseReviewController extends Controller
             'rating' => $review->rating,
             'title' => $review->title,
             'comment' => $review->comment,
-            'is_approved' => $review->is_approved,
+            'status' => $review->status, 'is_approved' => $review->status === 'approved',
             'user' => $review->relationLoaded('user') && $review->user ? [
                 'id' => $review->user->id,
                 'name' => $review->user->name,

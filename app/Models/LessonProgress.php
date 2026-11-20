@@ -17,11 +17,19 @@ class LessonProgress extends Model
         'lesson_id',
         'completed_at',
         'last_position_seconds',
+        'started_at',
+        'last_activity_at',
+        'max_position_seconds',
+        'watched_seconds',
     ];
 
     protected $casts = [
         'completed_at' => 'datetime',
         'last_position_seconds' => 'integer',
+        'max_position_seconds' => 'integer',
+        'watched_seconds' => 'integer',
+        'started_at' => 'datetime',
+        'last_activity_at' => 'datetime',
     ];
 
     public function user()

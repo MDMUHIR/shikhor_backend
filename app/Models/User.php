@@ -23,6 +23,7 @@ class User extends Authenticatable
         'type',
         'google_id',
         'avatar',
+        'bio',
     ];
 
     /**
@@ -42,8 +43,29 @@ class User extends Authenticatable
      */
     protected $casts = [
         'email_verified_at' => 'datetime',
+        'is_active' => 'boolean',
         'password' => 'hashed',
     ];
+
+    public const ROLE_SUPER_ADMIN = 'super_admin';
+    public const ROLE_ADMIN = 'admin';
+    public const ROLE_INSTRUCTOR = 'instructor';
+
+    public function isAdmin(): bool
+    {
+        return in_array($this->type, [self::ROLE_ADMIN, self::ROLE_SUPER_ADMIN], true);
+    }
+
+    public function isInstructor(): bool
+    {
+        return $this->type === self::ROLE_INSTRUCTOR;
+    }
+
+    /** Admins and instructors may use the course-management API. */
+    public function canManageCourses(): bool
+    {
+        return $this->isAdmin() || $this->isInstructor();
+    }
 
     public function wishList()
     {

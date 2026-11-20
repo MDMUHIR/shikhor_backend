@@ -7,6 +7,8 @@ use App\Models\Enrollment;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
 use App\Models\Order;
+use App\Models\QuizAttempt;
+use App\Notifications\LmsNotification;
 use App\Models\User;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
@@ -24,7 +26,7 @@ class CourseAccessService
             ->first();
 
         if ($enrollment
-            && $enrollment->status === 'active'
+            && in_array($enrollment->status, ['active', 'completed'], true)
             && $enrollment->expires_at !== null
             && $enrollment->expires_at->isPast()) {
             $enrollment->forceFill(['status' => 'expired'])->save();
@@ -106,7 +108,7 @@ class CourseAccessService
         ])->save();
 
         if ($isNew) {
-            $course->increment('total_students');
+            $course->refreshStudentCount();
         }
 
         return $enrollment->refresh();
@@ -121,7 +123,7 @@ class CourseAccessService
             ->where('order_id', $order->id)
             ->where('source', 'order')
             ->get()
-            ->each(fn (Enrollment $enrollment) => $enrollment->forceFill(['status' => 'revoked'])->save());
+            ->each(fn (Enrollment $enrollment) => $enrollment->forceFill(['status' => 'cancelled'])->save());
     }
 
     /**
@@ -144,7 +146,7 @@ class CourseAccessService
 
             if ($existing && (int) $existing->order_id === (int) $order->id) {
                 // Re-activate access that was revoked by a cancellation/refund.
-                if ($existing->status === 'revoked'
+                if ($existing->status === 'cancelled'
                     && ($existing->expires_at === null || $existing->expires_at->isFuture())) {
                     $existing->forceFill(['status' => 'active'])->save();
                 }
@@ -205,21 +207,40 @@ class CourseAccessService
         ];
     }
 
-    public function markLessonComplete(User $user, Lesson $lesson, ?int $position = null): LessonProgress
+    /**
+     * @throws \DomainException when the lesson has not been watched enough
+     */
+    public function markLessonComplete(User $user, Lesson $lesson, ?int $position = null, bool $enforceThreshold = true): LessonProgress
     {
         $progress = LessonProgress::firstOrNew([
             'user_id' => $user->id,
             'lesson_id' => $lesson->id,
         ]);
 
+        if ($enforceThreshold
+            && $lesson->isVideo()
+            && $lesson->completion_threshold
+            && $lesson->duration_seconds > 0
+            && $progress->completed_at === null) {
+            $needed = (int) ceil($lesson->duration_seconds * $lesson->completion_threshold / 100);
+
+            if (($progress->max_position_seconds ?? 0) < $needed) {
+                throw new \DomainException('Watch more of this lesson before marking it complete');
+            }
+        }
+
         $progress->course_id = $lesson->course_id;
-        $progress->completed_at = Carbon::now();
+        $progress->completed_at = $progress->completed_at ?? Carbon::now();
+        $progress->started_at = $progress->started_at ?? Carbon::now();
+        $progress->last_activity_at = Carbon::now();
 
         if ($position !== null) {
-            $progress->last_position_seconds = max((int) $position, $progress->last_position_seconds ?? 0);
+            $this->applyPosition($progress, $lesson, $position);
         }
 
         $progress->save();
+
+        $this->syncEnrollment($user, $lesson->course, $lesson);
 
         return $progress;
     }
@@ -233,7 +254,10 @@ class CourseAccessService
 
         $progress->course_id = $lesson->course_id;
         $progress->completed_at = null;
+        $progress->last_activity_at = Carbon::now();
         $progress->save();
+
+        $this->syncEnrollment($user, $lesson->course, $lesson);
 
         return $progress;
     }
@@ -246,21 +270,143 @@ class CourseAccessService
         ]);
 
         $progress->course_id = $lesson->course_id;
-        $progress->last_position_seconds = max(0, $seconds);
+        $progress->started_at = $progress->started_at ?? Carbon::now();
 
-        if (! $lesson->isQuiz()
+        $previous = (int) ($progress->last_position_seconds ?? 0);
+        $elapsed = $progress->last_activity_at
+            ? (int) abs($progress->last_activity_at->diffInSeconds(Carbon::now()))
+            : 0;
+
+        $this->applyPosition($progress, $lesson, $seconds);
+
+        // Credit watch time only for forward movement the wall clock could explain.
+        $delta = $progress->last_position_seconds - $previous;
+        if ($delta > 0 && $delta <= $elapsed + 15) {
+            $progress->watched_seconds = ($progress->watched_seconds ?? 0) + $delta;
+        }
+
+        $progress->last_activity_at = Carbon::now();
+
+        if ($lesson->isVideo()
             && $lesson->duration_seconds > 0
-            && $progress->last_position_seconds >= max($lesson->duration_seconds - 5, 0)) {
-            $progress->completed_at = $progress->completed_at ?? Carbon::now();
+            && $progress->completed_at === null) {
+            $threshold = $lesson->completion_threshold ?: 95;
+
+            if ($progress->max_position_seconds >= (int) ceil($lesson->duration_seconds * $threshold / 100)) {
+                $progress->completed_at = Carbon::now();
+            }
         }
 
         $progress->save();
 
+        $this->syncEnrollment($user, $lesson->course, $lesson);
+
         return $progress;
+    }
+
+    private function applyPosition(LessonProgress $progress, Lesson $lesson, int $seconds): void
+    {
+        $seconds = max(0, $seconds);
+
+        if ($lesson->duration_seconds > 0) {
+            $seconds = min($seconds, $lesson->duration_seconds);
+        }
+
+        $progress->last_position_seconds = $seconds;
+        $progress->max_position_seconds = max((int) ($progress->max_position_seconds ?? 0), $seconds);
+    }
+
+    /**
+     * Whether the student meets every completion rule (required lessons, % required, quizzes).
+     */
+    public function isCourseComplete(User $user, Course $course): bool
+    {
+        $summary = $this->progress($user, $course);
+
+        if ($summary['total_lessons'] === 0) {
+            return false;
+        }
+
+        $required = $course->publishedLessons()->where('is_required', true)->pluck('id');
+        $completed = collect($summary['completed_lesson_ids']);
+
+        if ($required->diff($completed)->isNotEmpty()) {
+            return false;
+        }
+
+        if ($summary['percentage'] < (float) ($course->completion_percentage_required ?? 100)) {
+            return false;
+        }
+
+        if ($course->require_quizzes_passed) {
+            $quizIds = $course->quizzes()->where('is_published', true)->where('is_required', true)->pluck('id');
+
+            if ($quizIds->isNotEmpty()) {
+                $passed = QuizAttempt::query()
+                    ->where('user_id', $user->id)
+                    ->whereIn('quiz_id', $quizIds)
+                    ->where('passed', true)
+                    ->distinct()
+                    ->pluck('quiz_id');
+
+                if ($quizIds->diff($passed)->isNotEmpty()) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Refresh cached enrollment progress, flag completion and auto-issue the certificate.
+     */
+    public function syncEnrollment(User $user, Course $course, ?Lesson $lastLesson = null): void
+    {
+        $enrollment = $this->enrollment($user, $course);
+
+        if (! $enrollment || ! $enrollment->isActive()) {
+            return;
+        }
+
+        $summary = $this->progress($user, $course);
+        $complete = $this->isCourseComplete($user, $course);
+
+        $enrollment->progress_percentage = $summary['percentage'];
+        $enrollment->last_accessed_at = Carbon::now();
+
+        if ($lastLesson) {
+            $enrollment->last_lesson_id = $lastLesson->id;
+        }
+
+        $enrollment->certificate_eligible = $complete && $course->certificate_enabled;
+
+        if ($complete) {
+            $enrollment->completed_at = $enrollment->completed_at ?? Carbon::now();
+            $enrollment->status = 'completed';
+        } elseif ($enrollment->status === 'completed') {
+            $enrollment->status = 'active';
+            $enrollment->completed_at = null;
+        }
+
+        $enrollment->save();
+
+        if ($enrollment->certificate_eligible) {
+            $certificate = app(CertificateService::class)->issue($user, $course);
+
+            if ($certificate->wasRecentlyCreated) {
+                $user->notify(new LmsNotification(
+                    'certificate_issued',
+                    'Certificate issued',
+                    'Your certificate for "'.$course->title.'" is ready.',
+                    ['certificate_number' => $certificate->certificate_number, 'course_id' => $course->id]
+                ));
+            }
+        }
     }
 
     public function canIssueCertificate(User $user, Course $course): bool
     {
-        return $this->progress($user, $course)['is_complete'];
+        return $course->certificate_enabled && $this->isCourseComplete($user, $course);
     }
 }

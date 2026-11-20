@@ -11,28 +11,47 @@ class Course extends Model
 {
     use HasFactory, SoftDeletes;
 
+    public const STATUSES = ['draft', 'under_review', 'published', 'unpublished', 'archived'];
+
     protected $fillable = [
         'course_category_id',
+        'instructor_id',
         'title',
         'slug',
         'subtitle',
+        'short_description',
         'description',
         'thumbnail',
+        'banner',
         'promo_video_url',
+        'promo_video_source',
+        'promo_video_path',
         'level',
         'language',
         'price',
         'offer_price',
+        'discount_starts_at',
+        'discount_ends_at',
         'access_days',
         'status',
         'is_featured',
         'duration_minutes',
+        'estimated_completion_minutes',
         'requirements',
         'outcomes',
+        'target_audience',
+        'tags',
+        'certificate_enabled',
+        'completion_percentage_required',
+        'require_quizzes_passed',
         'total_lessons',
+        'total_sections',
         'total_students',
         'rating_avg',
         'rating_count',
+        'seo_title',
+        'seo_description',
+        'seo_meta',
         'published_at',
     ];
 
@@ -44,16 +63,32 @@ class Course extends Model
         'duration_minutes' => 'integer',
         'requirements' => 'array',
         'outcomes' => 'array',
+        'target_audience' => 'array',
+        'tags' => 'array',
+        'seo_meta' => 'array',
+        'certificate_enabled' => 'boolean',
+        'require_quizzes_passed' => 'boolean',
+        'completion_percentage_required' => 'integer',
         'total_lessons' => 'integer',
+        'total_sections' => 'integer',
         'total_students' => 'integer',
         'rating_avg' => 'decimal:2',
         'rating_count' => 'integer',
+        'discount_starts_at' => 'datetime',
+        'discount_ends_at' => 'datetime',
         'published_at' => 'datetime',
     ];
+
+    protected $hidden = ['promo_video_path'];
 
     public function category()
     {
         return $this->belongsTo(CourseCategory::class, 'course_category_id');
+    }
+
+    public function instructor()
+    {
+        return $this->belongsTo(User::class, 'instructor_id');
     }
 
     public function sections()
@@ -110,9 +145,24 @@ class Course extends Model
             && ($this->published_at === null || $this->published_at->isPast());
     }
 
+    public function discountIsActive(): bool
+    {
+        if ($this->offer_price === null) {
+            return false;
+        }
+
+        return ($this->discount_starts_at === null || $this->discount_starts_at->isPast())
+            && ($this->discount_ends_at === null || $this->discount_ends_at->isFuture());
+    }
+
     public function getEffectivePriceAttribute(): float
     {
-        return (float) ($this->offer_price !== null ? $this->offer_price : $this->price);
+        return (float) ($this->discountIsActive() ? $this->offer_price : $this->price);
+    }
+
+    public function isFree(): bool
+    {
+        return $this->effective_price <= 0;
     }
 
     public function getThumbnailUrlAttribute(): ?string
@@ -120,10 +170,11 @@ class Course extends Model
         return $this->thumbnail;
     }
 
+    /** Recalculate the cached rating summary from approved reviews only. */
     public function refreshRating(): void
     {
         $stats = $this->reviews()
-            ->where('is_approved', true)
+            ->where('status', 'approved')
             ->selectRaw('COUNT(*) as review_count, COALESCE(AVG(rating), 0) as review_avg')
             ->first();
 
@@ -137,7 +188,15 @@ class Course extends Model
     {
         $this->forceFill([
             'total_lessons' => $this->publishedLessons()->count(),
+            'total_sections' => $this->sections()->count(),
             'duration_minutes' => (int) ceil($this->publishedLessons()->sum('duration_seconds') / 60),
+        ])->saveQuietly();
+    }
+
+    public function refreshStudentCount(): void
+    {
+        $this->forceFill([
+            'total_students' => $this->enrollments()->whereIn('status', ['active', 'completed', 'expired'])->count(),
         ])->saveQuietly();
     }
 

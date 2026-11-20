@@ -19,6 +19,9 @@ class Quiz extends Model
         'max_attempts',
         'is_published',
         'sort_order',
+        'shuffle_questions',
+        'shuffle_options',
+        'is_required',
     ];
 
     protected $casts = [
@@ -26,6 +29,9 @@ class Quiz extends Model
         'time_limit_minutes' => 'integer',
         'max_attempts' => 'integer',
         'is_published' => 'boolean',
+        'shuffle_questions' => 'boolean',
+        'shuffle_options' => 'boolean',
+        'is_required' => 'boolean',
         'sort_order' => 'integer',
     ];
 

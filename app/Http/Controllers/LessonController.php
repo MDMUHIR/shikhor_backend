@@ -7,6 +7,8 @@ use App\Models\Lesson;
 use App\Models\LessonProgress;
 use App\Services\CourseAccessService;
 use App\Services\CourseFormatter;
+use App\Services\VideoUrlService;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -15,7 +17,8 @@ class LessonController extends Controller
 {
     public function __construct(
         private readonly CourseAccessService $access,
-        private readonly CourseFormatter $formatter
+        private readonly CourseFormatter $formatter,
+        private readonly VideoUrlService $videos
     ) {
     }
 
@@ -27,6 +30,7 @@ class LessonController extends Controller
 
     public function adminIndex($courseId)
     {
+        if ($d = $this->denyCourse($courseId)) { return $d; }
         $course = Course::find($courseId);
 
         if (! $course) {
@@ -43,6 +47,7 @@ class LessonController extends Controller
 
     public function adminShow($id)
     {
+        if ($d = $this->denyLesson($id)) { return $d; }
         $lesson = Lesson::with('quiz')->find($id);
 
         if (! $lesson) {
@@ -54,15 +59,19 @@ class LessonController extends Controller
 
     public function store(Request $request)
     {
+        if ($d = $this->denyCourse($request->course_id)) { return $d; }
         $request->validate([
             'course_id' => 'required|exists:courses,id',
             'course_section_id' => 'nullable|exists:course_sections,id',
             'title' => 'required|string|max:255',
             'slug' => 'nullable|string|max:255',
             'description' => 'nullable|string',
-            'type' => 'nullable|in:video,text,quiz',
-            'video_source' => 'nullable|in:external,upload',
-            'video_url' => 'nullable|url',
+            'type' => 'nullable|in:video,text,quiz,document,resource',
+            'completion_threshold' => 'nullable|integer|min:1|max:100',
+            'is_required' => 'nullable|boolean',
+            'video_thumbnail' => 'nullable|string|max:2048',
+            'video_source' => 'nullable|in:external,upload,youtube',
+            'video_url' => ['nullable', 'url:https', 'max:2048'],
             'video' => $this->videoRules(),
             'duration_seconds' => 'nullable|integer|min:0',
             'content' => 'nullable|string',
@@ -72,8 +81,13 @@ class LessonController extends Controller
         ]);
 
         $course = Course::findOrFail($request->course_id);
+        $this->checkSection($request->course_section_id, $course->id);
+        $this->checkVideoUrl($request);
 
         $lesson = Lesson::create([
+            'completion_threshold' => $request->completion_threshold,
+            'is_required' => $request->has('is_required') ? $request->boolean('is_required') : true,
+            'video_thumbnail' => $request->video_thumbnail,
             'course_id' => $course->id,
             'course_section_id' => $request->course_section_id,
             'title' => $request->title,
@@ -89,6 +103,7 @@ class LessonController extends Controller
             'sort_order' => (int) $request->input('sort_order', 0),
         ]);
 
+        $this->normalizeVideo($lesson);
         $this->attachVideo($request, $lesson, $course);
 
         $course->refreshLessonStats();
@@ -101,15 +116,19 @@ class LessonController extends Controller
 
     public function update(Request $request)
     {
+        if ($d = $this->denyLesson($request->id)) { return $d; }
         $request->validate([
             'id' => 'required|exists:lessons,id',
             'course_section_id' => 'nullable|exists:course_sections,id',
             'title' => 'required|string|max:255',
             'slug' => 'nullable|string|max:255',
             'description' => 'nullable|string',
-            'type' => 'nullable|in:video,text,quiz',
-            'video_source' => 'nullable|in:external,upload',
-            'video_url' => 'nullable|url',
+            'type' => 'nullable|in:video,text,quiz,document,resource',
+            'completion_threshold' => 'nullable|integer|min:1|max:100',
+            'is_required' => 'nullable|boolean',
+            'video_thumbnail' => 'nullable|string|max:2048',
+            'video_source' => 'nullable|in:external,upload,youtube',
+            'video_url' => ['nullable', 'url:https', 'max:2048'],
             'video' => $this->videoRules(),
             'duration_seconds' => 'nullable|integer|min:0',
             'content' => 'nullable|string',
@@ -121,6 +140,8 @@ class LessonController extends Controller
 
         $lesson = Lesson::findOrFail($request->id);
         $type = $request->input('type', $lesson->type);
+        $this->checkSection($request->course_section_id, $lesson->course_id);
+        $this->checkVideoUrl($request);
 
         $payload = [
             'course_section_id' => $request->has('course_section_id') ? $request->course_section_id : $lesson->course_section_id,
@@ -133,6 +154,9 @@ class LessonController extends Controller
             'is_preview' => $request->has('is_preview') ? $request->boolean('is_preview') : $lesson->is_preview,
             'is_published' => $request->has('is_published') ? $request->boolean('is_published') : $lesson->is_published,
             'sort_order' => $request->has('sort_order') ? (int) $request->sort_order : $lesson->sort_order,
+            'completion_threshold' => $request->has('completion_threshold') ? $request->completion_threshold : $lesson->completion_threshold,
+            'is_required' => $request->has('is_required') ? $request->boolean('is_required') : $lesson->is_required,
+            'video_thumbnail' => $request->has('video_thumbnail') ? $request->video_thumbnail : $lesson->video_thumbnail,
         ];
 
         if ($type !== 'video') {
@@ -159,6 +183,7 @@ class LessonController extends Controller
         $lesson->update($payload);
 
         if ($type === 'video') {
+            $this->normalizeVideo($lesson);
             $this->attachVideo($request, $lesson, $lesson->course);
         }
 
@@ -172,6 +197,7 @@ class LessonController extends Controller
 
     public function destroy($id)
     {
+        if ($d = $this->denyLesson($id)) { return $d; }
         $lesson = Lesson::find($id);
 
         if (! $lesson) {
@@ -197,6 +223,8 @@ class LessonController extends Controller
         ]);
 
         foreach ($request->lessons as $item) {
+            if ($d = $this->denyLesson($item['id'])) { return $d; }
+
             $payload = ['sort_order' => (int) $item['sort_order']];
 
             if (array_key_exists('course_section_id', $item)) {
@@ -223,7 +251,9 @@ class LessonController extends Controller
         $course = Course::query()
             ->with([
                 'category',
+                'instructor',
                 'sections.lessons.quiz',
+                'sections.lessons.resources',
                 'lessons.quiz',
             ])
             ->where('slug', $slug)
@@ -307,7 +337,7 @@ class LessonController extends Controller
 
     public function show(Request $request, $id)
     {
-        $lesson = Lesson::with(['course', 'quiz'])->find($id);
+        $lesson = Lesson::with(['course', 'quiz', 'resources'])->find($id);
 
         if (! $lesson || ! $lesson->is_published) {
             return $this->error('Lesson not found', 404);
@@ -361,8 +391,13 @@ class LessonController extends Controller
             return $this->error('Video file not found', 404);
         }
 
+        // Remote disks (S3-compatible): hand out a short-lived provider URL instead of proxying bytes.
+        if (! $disk->getAdapter() instanceof \League\Flysystem\Local\LocalFilesystemAdapter) {
+            return redirect()->away($disk->temporaryUrl($lesson->video_path, now()->addMinutes(15)));
+        }
+
         return response()->file($disk->path($lesson->video_path), [
-            'Content-Type' => 'video/mp4',
+            'Content-Type' => $lesson->video_mime ?: 'video/mp4',
             'Cache-Control' => 'private, max-age=0, no-transform',
         ]);
     }
@@ -379,7 +414,11 @@ class LessonController extends Controller
             return $this->error('You do not have access to this lesson');
         }
 
-        $this->access->markLessonComplete($request->user(), $lesson);
+        try {
+            $this->access->markLessonComplete($request->user(), $lesson);
+        } catch (\DomainException $e) {
+            return $this->error($e->getMessage());
+        }
 
         return $this->success(
             'Lesson marked as completed',
@@ -443,6 +482,46 @@ class LessonController extends Controller
     |--------------------------------------------------------------------------
     */
 
+    private function checkSection($sectionId, int $courseId): void
+    {
+        if ($sectionId && ! \App\Models\CourseSection::where('id', $sectionId)->where('course_id', $courseId)->exists()) {
+            throw ValidationException::withMessages(['course_section_id' => ['The section does not belong to this course']]);
+        }
+    }
+
+    /** YouTube sources need a real YouTube URL; anything else must be https. */
+    private function checkVideoUrl(Request $request): void
+    {
+        $url = $request->input('video_url');
+
+        if (! $url) {
+            return;
+        }
+
+        if ($request->input('video_source') === 'youtube' && ! $this->videos->youtubeId($url)) {
+            throw ValidationException::withMessages(['video_url' => ['Enter a valid YouTube video URL']]);
+        }
+
+        if (! $this->videos->youtubeId($url) && ! $this->videos->isValidExternal($url)) {
+            throw ValidationException::withMessages(['video_url' => ['The video URL must be a valid https URL']]);
+        }
+    }
+
+    /** Detect YouTube links so the player gets an embeddable id. */
+    private function normalizeVideo(Lesson $lesson): void
+    {
+        if ($lesson->type !== 'video' || $lesson->video_source === 'upload' || ! $lesson->video_url) {
+            return;
+        }
+
+        $id = $this->videos->youtubeId($lesson->video_url);
+
+        $lesson->forceFill([
+            'video_source' => $id ? 'youtube' : 'external',
+            'video_external_id' => $id,
+        ])->save();
+    }
+
     private function videoRules(): string
     {
         $maxKb = (int) config('courses.video_max_size_kb', 524288);
@@ -474,6 +553,11 @@ class LessonController extends Controller
         $lesson->forceFill([
             'video_source' => 'upload',
             'video_path' => $path,
+            'video_url' => null,
+            'video_external_id' => null,
+            'video_mime' => $file->getMimeType(),
+            'video_size' => $file->getSize(),
+            'video_status' => 'ready',
         ])->save();
     }
 

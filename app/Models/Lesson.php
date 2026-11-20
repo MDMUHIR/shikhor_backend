@@ -24,6 +24,13 @@ class Lesson extends Model
         'is_preview',
         'is_published',
         'sort_order',
+        'video_external_id',
+        'video_thumbnail',
+        'video_mime',
+        'video_size',
+        'video_status',
+        'completion_threshold',
+        'is_required',
     ];
 
     protected $casts = [
@@ -31,7 +38,12 @@ class Lesson extends Model
         'is_preview' => 'boolean',
         'is_published' => 'boolean',
         'sort_order' => 'integer',
+        'is_required' => 'boolean',
+        'completion_threshold' => 'integer',
+        'video_size' => 'integer',
     ];
+
+    public const TYPES = ['video', 'text', 'document', 'resource', 'quiz', 'assignment', 'external'];
 
     protected $hidden = [
         'video_path',
@@ -45,6 +57,11 @@ class Lesson extends Model
     public function section()
     {
         return $this->belongsTo(CourseSection::class, 'course_section_id');
+    }
+
+    public function resources()
+    {
+        return $this->hasMany(LessonResource::class)->orderBy('sort_order')->orderBy('id');
     }
 
     public function quiz()
