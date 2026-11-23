@@ -43,3 +43,8 @@ Status: core backend complete. `php artisan test` → 17 passed. Migrations appl
 - Student API: `GET exams`, `GET exams/{id}`, `POST exams/{id}/start`, `GET exam-attempts/{id}`, `POST exam-attempts/{id}/answers`, `POST exam-attempts/{id}/submit`, `GET exams/{id}/attempts`.
 - Admin/instructor API: `admin/exams` (index/show/add/update/delete), `admin/exam-questions/*`, `GET admin/exams/{id}/attempts` (results + stats).
 - Scheduler: `exams:finalize-expired` runs every minute (needs `php artisan schedule:work` / cron `schedule:run`).
+
+## Course community & live classes
+- Tables: live_sessions, course_posts, comments (announcement comments + live chat), likes, community_mutes (migration 2026_11_26).
+- Staff (admin / the course's instructor) post announcements (pin, link, notify, lock comments), schedule/edit/cancel/start/end live classes (Zoom, Meet, YouTube Live, Facebook, Teams...), pin or delete chat messages, lock chat, mute students. Enrolled students read, like, comment/reply and chat. Join links are private to enrolled students + staff.
+- Live chat is polled (GET live-sessions/{id}/chat?after=<id>, ~2.5 s while live); no websocket server needed. For very large classes, front it with Laravel Reverb later.

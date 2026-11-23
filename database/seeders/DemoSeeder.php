@@ -9,25 +9,35 @@ use App\Models\BlogImage;
 use App\Models\BlogTag;
 use App\Models\Category;
 use App\Models\Certificate;
+use App\Models\Comment;
 use App\Models\Coupon;
+use App\Models\CouponUsage;
 use App\Models\Course;
 use App\Models\CourseCategory;
+use App\Models\CoursePost;
 use App\Models\CourseReview;
 use App\Models\CourseSection;
 use App\Models\DeliveryCharge;
 use App\Models\Enrollment;
+use App\Models\Exam;
+use App\Models\ExamQuestion;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
+use App\Models\LessonResource;
+use App\Models\Like;
+use App\Models\LiveSession;
 use App\Models\Order;
 use App\Models\OrderCourse;
 use App\Models\OrderProduct;
 use App\Models\OrderStatusHistory;
+use App\Models\Payment;
 use App\Models\Product;
 use App\Models\ProductImage;
 use App\Models\ProductVariant;
 use App\Models\Quiz;
 use App\Models\QuizAttempt;
 use App\Models\QuizQuestion;
+use App\Models\Refund;
 use App\Models\User;
 use App\Models\VariantAttribute;
 use App\Models\VariantImage;
@@ -50,8 +60,14 @@ class DemoSeeder extends Seeder
         $rafiq = $this->upsertUser('Rafiq Hasan', 'rafiq@gmail.com', 'customer', 'customer');
         $tanvir = $this->upsertUser('Tanvir Ahmed', 'tanvir@gmail.com', 'customer', 'customer');
 
+        $instructors = [
+            'arif' => $this->upsertUser('Arif Chowdhury', 'arif@gmail.com', 'instructor', 'instructor', 'Senior full-stack engineer & Laravel educator', 'Arif has shipped production applications for startups across Asia and teaches web development with a project-first approach.', 'images/instructors/arif.jpg'),
+            'farhana' => $this->upsertUser('Farhana Rahman', 'farhana@gmail.com', 'instructor', 'instructor', 'Product designer & Figma mentor', 'Farhana leads design systems work for fintech products and has mentored 400+ students into design roles.', 'images/instructors/farhana.jpg'),
+            'mahmud' => $this->upsertUser('Mahmudul Hasan', 'mahmud@gmail.com', 'instructor', 'instructor', 'Growth marketer & freelancing coach', 'Mahmudul grew audiences for local brands before building a six-figure freelance practice from Dhaka.', 'images/instructors/mahmud.jpg'),
+        ];
+
         $courseCategories = $this->seedCourseCategories();
-        $courses = $this->seedCourses($courseCategories);
+        $courses = $this->seedCourses($courseCategories, $instructors);
 
         $productCategories = $this->seedProductCategories();
         $products = $this->seedProducts($productCategories);
@@ -66,6 +82,10 @@ class DemoSeeder extends Seeder
         $this->seedLearningProgress($customer, $nusrat, $rafiq, $courses, $enrollments);
         $this->seedReviews($customer, $nusrat, $rafiq, $tanvir, $courses);
         $this->seedCertificates($customer, $rafiq, $tanvir, $courses, $enrollments);
+        $this->seedLessonResources($courses);
+        $this->seedExams($courses, $admin);
+        $this->seedCommunity($courses, $instructors, $customer, $nusrat, $rafiq);
+        $this->seedNotifications($customer, $nusrat, $courses, $enrollments);
         $this->refreshCourseStats();
 
         $this->command?->info('Demo data seeded: '
@@ -81,6 +101,12 @@ class DemoSeeder extends Seeder
         Schema::disableForeignKeyConstraints();
 
         foreach ([
+            'notifications',
+            'comments', 'likes', 'course_posts', 'live_sessions', 'community_mutes',
+            'exam_attempts', 'exam_questions', 'exams',
+            'lesson_resources',
+            'refunds', 'payment_events', 'payments',
+            'coupon_usages', 'coupon_courses', 'coupon_course_categories',
             'order_status_histories', 'order_products', 'order_courses', 'orders',
             'lesson_progress', 'certificates', 'course_reviews', 'quiz_attempts',
             'quiz_questions', 'quizzes', 'enrollments', 'lessons', 'course_sections',
@@ -98,7 +124,7 @@ class DemoSeeder extends Seeder
         Schema::enableForeignKeyConstraints();
     }
 
-    private function upsertUser(string $name, string $email, string $type, string $password): User
+    private function upsertUser(string $name, string $email, string $type, string $password, ?string $headline = null, ?string $bio = null, ?string $avatar = null): User
     {
         return User::updateOrCreate(
             ['email' => $email],
@@ -106,6 +132,10 @@ class DemoSeeder extends Seeder
                 'name' => $name,
                 'password' => Hash::make($password),
                 'type' => $type,
+                'is_active' => true,
+                'headline' => $headline,
+                'bio' => $bio,
+                'avatar' => $avatar,
                 'email_verified_at' => now(),
             ]
         );
@@ -141,10 +171,19 @@ class DemoSeeder extends Seeder
 
     /**
      * @param  array<string, CourseCategory>  $categories
+     * @param  array<string, User>  $instructors
      * @return array<string, Course>
      */
-    private function seedCourses(array $categories): array
+    private function seedCourses(array $categories, array $instructors = []): array
     {
+        $instructorByCategory = [
+            'web-development' => 'arif',
+            'design-ui-ux' => 'farhana',
+            'digital-marketing' => 'mahmud',
+            'data-ai' => 'farhana',
+            'business-freelancing' => 'mahmud',
+        ];
+
         $definitions = [
             [
                 'category' => 'web-development',
@@ -417,13 +456,25 @@ class DemoSeeder extends Seeder
         $courses = [];
         foreach ($definitions as $definition) {
             $category = $categories[$definition['category']];
+            $instructor = $instructors[$instructorByCategory[$definition['category']] ?? ''] ?? null;
+            $totalSeconds = 0;
+            foreach ($definition['curriculum'] as $sectionData) {
+                foreach ($sectionData['lessons'] as $lessonData) {
+                    $totalSeconds += (int) ($lessonData['duration'] ?? 0);
+                }
+            }
+            $plainDescription = trim(strip_tags($definition['description']));
+
             $course = Course::create([
                 'course_category_id' => $category->id,
+                'instructor_id' => $instructor?->id,
                 'title' => $definition['title'],
                 'slug' => Str::slug($definition['title']),
                 'subtitle' => $definition['subtitle'],
+                'short_description' => Str::limit($plainDescription, 180),
                 'description' => $definition['description'],
                 'thumbnail' => $definition['thumbnail'],
+                'banner' => $definition['thumbnail'],
                 'level' => $definition['level'],
                 'language' => 'en',
                 'price' => $definition['price'],
@@ -431,8 +482,16 @@ class DemoSeeder extends Seeder
                 'access_days' => $definition['access_days'],
                 'status' => 'published',
                 'is_featured' => $definition['featured'],
+                'estimated_completion_minutes' => (int) ceil($totalSeconds / 60),
                 'requirements' => $definition['requirements'],
                 'outcomes' => $definition['outcomes'],
+                'target_audience' => ['Beginners who want practical, job-ready skills', 'Professionals switching careers'],
+                'tags' => [$category->name, Str::headline($definition['level']), 'Online course'],
+                'certificate_enabled' => true,
+                'completion_percentage_required' => 100,
+                'require_quizzes_passed' => true,
+                'seo_title' => $definition['title'].' | Shikhor Academy',
+                'seo_description' => Str::limit($plainDescription, 155),
                 'published_at' => now()->subDays($definition['published_days_ago']),
             ]);
 
@@ -859,16 +918,31 @@ class DemoSeeder extends Seeder
 
     private function seedCoupons(): void
     {
-        Coupon::create(['code' => 'WELCOME10', 'type' => 'percentage', 'discount' => 10]);
-        Coupon::create(['code' => 'FLAT500', 'type' => 'fixed', 'discount' => 500]);
-        Coupon::create(['code' => 'LEARN15', 'type' => 'percentage', 'discount' => 15]);
+        Coupon::create([
+            'code' => 'WELCOME10', 'type' => 'percentage', 'discount' => 10,
+            'is_active' => true, 'applies_to' => 'all', 'max_discount' => 2000,
+            'min_purchase' => 1000, 'per_user_limit' => 1, 'usage_limit' => 500,
+            'starts_at' => now()->subMonths(2), 'expires_at' => now()->addMonths(6),
+        ]);
+        Coupon::create([
+            'code' => 'FLAT500', 'type' => 'fixed', 'discount' => 500,
+            'is_active' => true, 'applies_to' => 'courses', 'min_purchase' => 3000,
+            'per_user_limit' => 1, 'usage_limit' => 200,
+            'starts_at' => now()->subMonth(), 'expires_at' => now()->addMonths(3),
+        ]);
+        Coupon::create([
+            'code' => 'LEARN15', 'type' => 'percentage', 'discount' => 15,
+            'is_active' => true, 'applies_to' => 'courses', 'max_discount' => 3000,
+            'min_purchase' => 2000, 'per_user_limit' => 2, 'usage_limit' => 300,
+            'starts_at' => now()->subWeek(), 'expires_at' => now()->addMonths(2),
+        ]);
     }
 
     private function seedDeliveryCharges(): void
     {
-        DeliveryCharge::create(['name' => 'Inside Dhaka', 'charge' => 60, 'minimum_order' => 0, 'status' => true]);
-        DeliveryCharge::create(['name' => 'Outside Dhaka', 'charge' => 120, 'minimum_order' => 0, 'status' => true]);
-        DeliveryCharge::create(['name' => 'Free delivery', 'charge' => 0, 'minimum_order' => 2000, 'status' => true]);
+        DeliveryCharge::create(['name' => 'Inside Dhaka', 'zone' => 'inside_dhaka', 'charge' => 60, 'minimum_order' => 0, 'status' => true]);
+        DeliveryCharge::create(['name' => 'Outside Dhaka', 'zone' => 'outside_dhaka', 'charge' => 120, 'minimum_order' => 0, 'status' => true]);
+        DeliveryCharge::create(['name' => 'Free delivery over 2000', 'zone' => 'free_over', 'charge' => 0, 'minimum_order' => 2000, 'status' => true]);
     }
 
     /**
@@ -905,19 +979,19 @@ class DemoSeeder extends Seeder
             ['pending', 'Order Placed', null, 2],
         ]);
 
-        $courseOrder = $this->createOrder($customer, 'ORD-20261108-0003', 'delivered', 'paid', 'online', [], [
+        $courseOrder = $this->createOrder($customer, 'ORD-20261108-0003', 'enrolled', 'paid', 'online', [], [
             ['course' => $courses['complete-web-development-bootcamp'], 'unit_price' => 6500],
-            ['course' => $courses['ui-ux-design-masterclass-with-figma'], 'unit_price' => 4500],
+            ['course' => $courses['uiux-design-masterclass-with-figma'], 'unit_price' => 4500],
         ], [
             'delivery_charge' => 0,
             'coupon_code' => 'WELCOME10',
             'discount' => 1100,
-            'discount_type' => 'percentage',
+            'discount_type' => 'fixed',
             'notes' => 'Course bundle purchase.',
         ], [
             ['pending', 'Order Placed', null, 11],
             ['confirmed', 'Order Confirmed', 'Payment confirmed.', 11],
-            ['delivered', 'Delivered', 'Course access granted.', 10],
+            ['enrolled', 'Enrolled', 'Course access granted.', 10],
         ]);
 
         $this->createOrder($nusrat, 'ORD-20261114-0004', 'shipped', 'paid', 'cash_on_delivery', [
@@ -997,7 +1071,51 @@ class DemoSeeder extends Seeder
             'total_quantity' => $totalQuantity,
             'total' => max($discountedSubtotal, 0) + $deliveryCharge,
             'notes' => $meta['notes'] ?? null,
+            'paid_at' => in_array($paymentStatus, ['paid', 'refunded', 'partially_refunded'], true) ? now()->subDays(10) : null,
+            'refunded_amount' => $paymentStatus === 'refunded' ? max($discountedSubtotal, 0) + $deliveryCharge : 0,
         ]);
+
+        if (in_array($paymentStatus, ['paid', 'refunded', 'partially_refunded'], true)) {
+            $provider = $paymentMethod === 'online' ? 'stripe' : 'manual';
+
+            $payment = Payment::create([
+                'order_id' => $order->id,
+                'user_id' => $user->id,
+                'provider' => $provider,
+                'provider_reference' => $provider === 'stripe' ? 'cs_demo_'.$order->id : 'manual-'.$order->order_number,
+                'transaction_id' => $provider === 'stripe' ? 'pi_demo_'.$order->id : null,
+                'amount' => $order->total,
+                'refunded_amount' => $paymentStatus === 'refunded' ? $order->total : 0,
+                'currency' => 'BDT',
+                'status' => $paymentStatus === 'refunded' ? Payment::REFUNDED : Payment::SUCCESSFUL,
+                'paid_at' => now()->subDays(10),
+            ]);
+
+            if ($paymentStatus === 'refunded') {
+                Refund::create([
+                    'payment_id' => $payment->id,
+                    'order_id' => $order->id,
+                    'amount' => $order->total,
+                    'reason' => 'Customer changed their mind',
+                    'status' => 'completed',
+                    'provider_refund_id' => 're_demo_'.$order->id,
+                    'created_by' => null,
+                ]);
+            }
+        }
+
+        $couponCode = $meta['coupon_code'] ?? null;
+
+        if ($couponCode && $discount > 0 && ($coupon = Coupon::query()->where('code', $couponCode)->first())) {
+            CouponUsage::create([
+                'coupon_id' => $coupon->id,
+                'user_id' => $user->id,
+                'order_id' => $order->id,
+                'discount_amount' => round($subtotal - $discountedSubtotal, 2),
+            ]);
+
+            $coupon->increment('times_used');
+        }
 
         foreach ($productLines as $line) {
             /** @var Product $product */
@@ -1082,7 +1200,7 @@ class DemoSeeder extends Seeder
         $enrollments = [];
 
         $enrollments['customer-web'] = $this->enroll($customer, $courses['complete-web-development-bootcamp'], 'active', $courseOrder, 10);
-        $enrollments['customer-uiux'] = $this->enroll($customer, $courses['ui-ux-design-masterclass-with-figma'], 'active', $courseOrder, 10);
+        $enrollments['customer-uiux'] = $this->enroll($customer, $courses['uiux-design-masterclass-with-figma'], 'active', $courseOrder, 10);
         $enrollments['customer-marketing'] = $this->enroll($customer, $courses['digital-marketing-and-social-media-growth'], 'active', null, 24);
         $enrollments['customer-freelancing'] = $this->enroll($customer, $courses['freelancing-masterclass-earn-in-dollars'], 'active', null, 6);
 
@@ -1093,11 +1211,11 @@ class DemoSeeder extends Seeder
         $enrollments['rafiq-marketing'] = $this->enroll($rafiq, $courses['digital-marketing-and-social-media-growth'], 'active', null, 22);
         $enrollments['rafiq-freelancing'] = $this->enroll($rafiq, $courses['freelancing-masterclass-earn-in-dollars'], 'active', null, 21);
 
-        $enrollments['tanvir-uiux'] = $this->enroll($tanvir, $courses['ui-ux-design-masterclass-with-figma'], 'active', null, 16);
+        $enrollments['tanvir-uiux'] = $this->enroll($tanvir, $courses['uiux-design-masterclass-with-figma'], 'active', null, 16);
         $enrollments['tanvir-laravel'] = $this->enroll($tanvir, $courses['advanced-laravel-api-development'], 'active', null, 8);
 
-        $this->enroll($rafiq, $courses['advanced-laravel-api-development'], 'revoked', null, 30);
-        $this->enroll($rafiq, $courses['ui-ux-design-masterclass-with-figma'], 'expired', null, 400);
+        $this->enroll($rafiq, $courses['advanced-laravel-api-development'], 'cancelled', null, 30);
+        $this->enroll($rafiq, $courses['uiux-design-masterclass-with-figma'], 'expired', null, 400);
 
         return $enrollments;
     }
@@ -1124,6 +1242,8 @@ class DemoSeeder extends Seeder
             'enrolled_at' => $enrolledAt,
             'starts_at' => $enrolledAt,
             'expires_at' => $expiresAt,
+            'progress_percentage' => 0,
+            'certificate_eligible' => false,
         ]);
     }
 
@@ -1133,31 +1253,63 @@ class DemoSeeder extends Seeder
      */
     private function seedLearningProgress(User $customer, User $nusrat, User $rafiq, array $courses, array $enrollments): void
     {
-        $this->completeLessons($customer, $courses['ui-ux-design-masterclass-with-figma'], null);
-        $this->completeLessons($customer, $courses['complete-web-development-bootcamp'], 4);
-        $this->completeLessons($nusrat, $courses['python-for-data-science-and-machine-learning'], 3);
-        $this->completeLessons($rafiq, $courses['freelancing-masterclass-earn-in-dollars'], null);
+        $this->completeLessons($customer, $courses['uiux-design-masterclass-with-figma'], null, $enrollments['customer-uiux']);
+        $this->completeLessons($customer, $courses['complete-web-development-bootcamp'], 4, $enrollments['customer-web']);
+        $this->completeLessons($nusrat, $courses['python-for-data-science-and-machine-learning'], 3, $enrollments['nusrat-data']);
+        $this->completeLessons($rafiq, $courses['freelancing-masterclass-earn-in-dollars'], null, $enrollments['rafiq-freelancing']);
 
         $this->seedQuizAttempt($customer, $courses['complete-web-development-bootcamp'], $enrollments['customer-web'], 4, 8);
         $this->seedQuizAttempt($rafiq, $courses['freelancing-masterclass-earn-in-dollars'], $enrollments['rafiq-freelancing'], 5, 15);
     }
 
-    private function completeLessons(User $user, Course $course, ?int $limit): void
+    private function completeLessons(User $user, Course $course, ?int $limit, ?Enrollment $enrollment = null): void
     {
         $lessons = $course->publishedLessons()->get();
         if ($limit !== null) {
             $lessons = $lessons->take($limit);
         }
 
+        $lastLesson = null;
+
         foreach ($lessons as $index => $lesson) {
+            $completedAt = now()->subDays(max(1, 20 - $index));
+
             LessonProgress::create([
                 'user_id' => $user->id,
                 'course_id' => $course->id,
                 'lesson_id' => $lesson->id,
-                'completed_at' => now()->subDays(max(1, 20 - $index)),
+                'completed_at' => $completedAt,
                 'last_position_seconds' => $lesson->duration_seconds,
+                'started_at' => $completedAt->copy()->subMinutes(20),
+                'last_activity_at' => $completedAt,
+                'max_position_seconds' => $lesson->duration_seconds,
+                'watched_seconds' => $lesson->duration_seconds,
             ]);
+
+            $lastLesson = $lesson;
         }
+
+        if (! $enrollment) {
+            return;
+        }
+
+        $total = $course->publishedLessons()->count();
+        $completed = LessonProgress::query()
+            ->where('user_id', $user->id)
+            ->where('course_id', $course->id)
+            ->whereNotNull('completed_at')
+            ->count();
+        $progress = $total > 0 ? round($completed / $total * 100, 2) : 0;
+        $finished = $total > 0 && $completed >= $total;
+
+        $enrollment->forceFill([
+            'progress_percentage' => $progress,
+            'last_lesson_id' => $lastLesson?->id,
+            'last_accessed_at' => now()->subHours(6),
+            'completed_at' => $finished ? now()->subDays(2) : null,
+            'certificate_eligible' => $finished && $progress >= (float) $course->completion_percentage_required,
+            'status' => $finished ? 'completed' : $enrollment->status,
+        ])->save();
     }
 
     private function seedQuizAttempt(User $user, Course $course, Enrollment $enrollment, int $score, int $daysAgo): void
@@ -1192,8 +1344,8 @@ class DemoSeeder extends Seeder
             [$courses['complete-web-development-bootcamp'], $customer, 5, 'Exactly what I needed', 'The projects kept me accountable. I deployed my first full-stack app in week six.', true],
             [$courses['complete-web-development-bootcamp'], $nusrat, 4, 'Very practical', 'Clear explanations and great pacing. I would love even more exercises on JavaScript arrays.', true],
             [$courses['complete-web-development-bootcamp'], $rafiq, 5, 'Worth every taka', 'The Laravel section alone paid for the course. Highly recommended for beginners.', true],
-            [$courses['ui-ux-design-masterclass-with-figma'], $customer, 5, 'Portfolio changed completely', 'I rebuilt my portfolio during the course and landed two interviews within a month.', true],
-            [$courses['ui-ux-design-masterclass-with-figma'], $tanvir, 4, 'Strong design foundations', 'The design system module was excellent. I use the component workflow every day now.', true],
+            [$courses['uiux-design-masterclass-with-figma'], $customer, 5, 'Portfolio changed completely', 'I rebuilt my portfolio during the course and landed two interviews within a month.', true],
+            [$courses['uiux-design-masterclass-with-figma'], $tanvir, 4, 'Strong design foundations', 'The design system module was excellent. I use the component workflow every day now.', true],
             [$courses['digital-marketing-and-social-media-growth'], $nusrat, 4, 'Helped my small business', 'I finally understand where my ad budget goes. The analytics lesson was an eye-opener.', true],
             [$courses['digital-marketing-and-social-media-growth'], $rafiq, 5, 'Actionable from day one', 'I applied the content strategy to my page and doubled my reach in three weeks.', true],
             [$courses['python-for-data-science-and-machine-learning'], $customer, 4, 'Great introduction', 'Well structured and beginner friendly. The notebooks are a useful reference.', true],
@@ -1211,6 +1363,8 @@ class DemoSeeder extends Seeder
                 'title' => $title,
                 'comment' => $comment,
                 'is_approved' => $approved,
+                'status' => $approved ? 'approved' : 'pending',
+                'helpful_count' => $approved ? random_int(2, 24) : 0,
             ]);
 
             $review->forceFill(['created_at' => now()->subDays(random_int(1, 25))])->saveQuietly();
@@ -1223,20 +1377,24 @@ class DemoSeeder extends Seeder
      */
     private function seedCertificates(User $customer, User $rafiq, User $tanvir, array $courses, array $enrollments): void
     {
-        $this->issueCertificate($customer, $courses['ui-ux-design-masterclass-with-figma'], $enrollments['customer-uiux'], 'issued', 9);
+        $this->issueCertificate($customer, $courses['uiux-design-masterclass-with-figma'], $enrollments['customer-uiux'], 'issued', 9);
         $this->issueCertificate($rafiq, $courses['freelancing-masterclass-earn-in-dollars'], $enrollments['rafiq-freelancing'], 'issued', 6);
         $this->issueCertificate($tanvir, $courses['advanced-laravel-api-development'], $enrollments['tanvir-laravel'], 'revoked', 4);
     }
 
     private function issueCertificate(User $user, Course $course, Enrollment $enrollment, string $status, int $daysAgo): Certificate
     {
+        $issuedAt = now()->subDays($daysAgo);
+
         return Certificate::create([
             'user_id' => $user->id,
             'course_id' => $course->id,
             'enrollment_id' => $enrollment->id,
             'certificate_number' => sprintf('CERT-%s-%05d-%05d', strtoupper(Str::random(6)), $course->id, $user->id),
+            'verification_token' => Str::random(48),
             'status' => $status,
-            'issued_at' => now()->subDays($daysAgo),
+            'issued_at' => $issuedAt,
+            'completed_at' => $issuedAt->copy()->subDay(),
             'revoked_at' => $status === 'revoked' ? now()->subDays(max(1, $daysAgo - 2)) : null,
             'metadata' => [
                 'student_name' => $user->name,
@@ -1245,14 +1403,336 @@ class DemoSeeder extends Seeder
         ]);
     }
 
+    /**
+     * Course-level attachments and per-lesson resources so download panels have content.
+     *
+     * @param  array<string, Course>  $courses
+     */
+    private function seedLessonResources(array $courses): void
+    {
+        $links = [
+            'complete-web-development-bootcamp' => [
+                ['Course starter files', 'https://github.com/example/web-bootcamp-starter'],
+                ['HTML & CSS cheat sheet', 'https://developer.mozilla.org/en-US/docs/Web/CSS'],
+            ],
+            'uiux-design-masterclass-with-figma' => [
+                ['Figma file: design system kit', 'https://www.figma.com/community/file/design-system-example'],
+            ],
+            'digital-marketing-and-social-media-growth' => [
+                ['Campaign planning template', 'https://docs.google.com/spreadsheets/d/example-campaign-template'],
+            ],
+            'python-for-data-science-and-machine-learning' => [
+                ['Practice notebooks', 'https://github.com/example/python-data-notebooks'],
+            ],
+            'advanced-laravel-api-development' => [
+                ['API testing collection', 'https://github.com/example/laravel-api-collection'],
+            ],
+        ];
+
+        foreach ($links as $slug => $resources) {
+            $course = $courses[$slug] ?? null;
+
+            if (! $course) {
+                continue;
+            }
+
+            foreach ($resources as $index => [$title, $url]) {
+                LessonResource::create([
+                    'course_id' => $course->id,
+                    'lesson_id' => null,
+                    'title' => $title,
+                    'external_url' => $url,
+                    'is_downloadable' => true,
+                    'sort_order' => $index + 1,
+                ]);
+            }
+
+            $firstLesson = $course->publishedLessons()->first();
+
+            if ($firstLesson) {
+                LessonResource::create([
+                    'course_id' => $course->id,
+                    'lesson_id' => $firstLesson->id,
+                    'title' => 'Lesson notes — '.$firstLesson->title,
+                    'external_url' => 'https://developer.mozilla.org/en-US/docs/Learn',
+                    'is_downloadable' => true,
+                    'sort_order' => 1,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Standalone and course exams with multiple question types.
+     *
+     * @param  array<string, Course>  $courses
+     */
+    private function seedExams(array $courses, User $admin): void
+    {
+        $webExam = Exam::create([
+            'course_id' => $courses['complete-web-development-bootcamp']->id,
+            'title' => 'Web Development Final Exam',
+            'description' => 'Covers HTML, CSS, JavaScript and Laravel fundamentals.',
+            'instructions' => 'Answer all questions. One mark per question, 60% to pass.',
+            'duration_minutes' => 30,
+            'pass_percentage' => 60,
+            'max_attempts' => 2,
+            'negative_marking' => false,
+            'shuffle_questions' => true,
+            'show_answers' => 'after_submit',
+            'starts_at' => now()->subDays(2),
+            'ends_at' => now()->addDays(20),
+            'is_published' => true,
+        ]);
+
+        $this->createExamQuestions($webExam, [
+            ['single_choice', 'Which HTML element holds page metadata?', ['a' => '<body>', 'b' => '<head>', 'c' => '<main>', 'd' => '<footer>'], ['b'], 1, 'Metadata lives inside the <head> element.'],
+            ['multiple_choice', 'Which of these are valid JavaScript data types?', ['a' => 'String', 'b' => 'Number', 'c' => 'Paragraph', 'd' => 'Boolean'], ['a', 'b', 'd'], 2, 'String, Number and Boolean are primitive types.'],
+            ['true_false', 'Laravel migrations are used to version the database schema.', ['a' => 'True', 'b' => 'False'], ['a'], 1, 'Migrations let the team version schema changes.'],
+            ['single_choice', 'Which HTTP method best describes updating an existing resource?', ['a' => 'GET', 'b' => 'POST', 'c' => 'PUT', 'd' => 'HEAD'], ['c'], 1, 'PUT/PATCH are used for updates.'],
+        ]);
+
+        $designExam = Exam::create([
+            'course_id' => $courses['uiux-design-masterclass-with-figma']->id,
+            'title' => 'Design Portfolio Assessment',
+            'description' => 'A short assessment on design systems and usability.',
+            'instructions' => 'This exam opens next week. Two attempts allowed.',
+            'duration_minutes' => 25,
+            'pass_percentage' => 50,
+            'max_attempts' => 2,
+            'negative_marking' => true,
+            'negative_marking_type' => 'fixed',
+            'negative_marking_value' => 0.25,
+            'allow_negative_total' => false,
+            'shuffle_questions' => false,
+            'show_answers' => 'never',
+            'starts_at' => now()->addDays(3),
+            'ends_at' => now()->addDays(17),
+            'is_published' => true,
+        ]);
+
+        $this->createExamQuestions($designExam, [
+            ['single_choice', 'What does UX stand for?', ['a' => 'User Experience', 'b' => 'Universal Export', 'c' => 'User Example', 'd' => 'Unique Extension'], ['a'], 1, null],
+            ['multiple_choice', 'Which are principles of visual hierarchy?', ['a' => 'Contrast', 'b' => 'Scale', 'c' => 'Random spacing', 'd' => 'Alignment'], ['a', 'b', 'd'], 2, 'Contrast, scale and alignment guide the eye.'],
+            ['true_false', 'Five usability test participants usually uncover most serious issues.', ['a' => 'True', 'b' => 'False'], ['a'], 1, 'Small qualitative tests surface most major problems.'],
+        ]);
+
+        Exam::create([
+            'course_id' => null,
+            'title' => 'Shikhor Scholarship Admission Test',
+            'description' => 'Open to every signed-in student. Score 50% or more to qualify.',
+            'instructions' => '20 minutes. 3 questions. No negative marking.',
+            'duration_minutes' => 20,
+            'pass_percentage' => 50,
+            'max_attempts' => 1,
+            'is_published' => true,
+            'starts_at' => now()->subDays(2),
+            'ends_at' => now()->addDays(20),
+        ]);
+
+        $standalone = Exam::query()->whereNull('course_id')->latest('id')->first();
+
+        if ($standalone) {
+            $this->createExamQuestions($standalone, [
+                ['single_choice', 'Which of these is an operating system?', ['a' => 'Chrome', 'b' => 'Linux', 'c' => 'Figma', 'd' => 'MySQL'], ['b'], 1, 'Linux is an operating system.'],
+                ['true_false', 'HTTP is a stateless protocol by design.', ['a' => 'True', 'b' => 'False'], ['a'], 1, 'Each request is independent unless sessions are added.'],
+                ['multiple_choice', 'Which skills are useful for online learning?', ['a' => 'Time management', 'b' => 'Note taking', 'c' => 'Ignoring deadlines', 'd' => 'Asking questions'], ['a', 'b', 'd'], 2, null],
+            ]);
+        }
+    }
+
+    /**
+     * @param  array<int, array{0:string,1:string,2:array<string,string>,3:array<int,string>,4:int,5:?string}>  $questions
+     */
+    private function createExamQuestions(Exam $exam, array $questions): void
+    {
+        foreach ($questions as $index => [$type, $text, $options, $correct, $marks, $explanation]) {
+            ExamQuestion::create([
+                'exam_id' => $exam->id,
+                'type' => $type,
+                'question' => $text,
+                'options' => collect($options)
+                    ->map(fn (string $label, string $id) => ['id' => $id, 'text' => $label])
+                    ->values()
+                    ->all(),
+                'correct_answers' => $correct,
+                'marks' => $marks,
+                'explanation' => $explanation,
+                'sort_order' => $index + 1,
+            ]);
+        }
+    }
+
+    /**
+     * Announcements, comments, likes, live classes and chat for the community pages.
+     *
+     * @param  array<string, Course>  $courses
+     * @param  array<string, User>  $instructors
+     */
+    private function seedCommunity(array $courses, array $instructors, User $customer, User $nusrat, User $rafiq): void
+    {
+        $web = $courses['complete-web-development-bootcamp'];
+        $design = $courses['uiux-design-masterclass-with-figma'];
+        $arif = $instructors['arif'] ?? null;
+        $farhana = $instructors['farhana'] ?? null;
+
+        if ($arif && $web) {
+            $post = CoursePost::create([
+                'course_id' => $web->id,
+                'user_id' => $arif->id,
+                'title' => 'Week 3 live workshop: build a REST API together',
+                'body' => 'This Friday we will build a small REST API from scratch and test it. Bring your questions from the Laravel module. The recording will be posted here afterwards.',
+                'link_url' => 'https://zoom.us/j/9876543210',
+                'link_label' => 'Join the workshop',
+                'link_provider' => 'zoom',
+                'is_pinned' => true,
+                'pinned_at' => now()->subDay(),
+            ]);
+
+            $topComment = Comment::create([
+                'commentable_type' => 'post',
+                'commentable_id' => $post->id,
+                'user_id' => $customer->id,
+                'body' => 'Will the recording be available if I cannot attend live?',
+                'likes_count' => 2,
+            ]);
+
+            Comment::create([
+                'commentable_type' => 'post',
+                'commentable_id' => $post->id,
+                'user_id' => $arif->id,
+                'parent_id' => $topComment->id,
+                'body' => 'Yes, I will upload the recording to this post within a few hours.',
+            ]);
+
+            Comment::create([
+                'commentable_type' => 'post',
+                'commentable_id' => $post->id,
+                'user_id' => $nusrat->id,
+                'body' => 'Excited! The last workshop helped me finish my first API.',
+            ]);
+
+            Like::create(['likeable_type' => 'post', 'likeable_id' => $post->id, 'user_id' => $customer->id]);
+            Like::create(['likeable_type' => 'post', 'likeable_id' => $post->id, 'user_id' => $nusrat->id]);
+            Like::create(['likeable_type' => 'comment', 'likeable_id' => $topComment->id, 'user_id' => $nusrat->id]);
+            Like::create(['likeable_type' => 'comment', 'likeable_id' => $topComment->id, 'user_id' => $rafiq->id]);
+
+            $session = LiveSession::create([
+                'course_id' => $web->id,
+                'created_by' => $arif->id,
+                'title' => 'Build a REST API with Laravel',
+                'description' => 'A hands-on workshop. We will create routes, controllers, validation and tests.',
+                'provider' => 'zoom',
+                'join_url' => 'https://zoom.us/j/9876543210',
+                'scheduled_at' => now()->addDays(2)->setTime(20, 0),
+                'duration_minutes' => 90,
+                'status' => 'scheduled',
+                'chat_enabled' => true,
+            ]);
+
+            Comment::create([
+                'commentable_type' => 'post',
+                'commentable_id' => $post->id,
+                'user_id' => $rafiq->id,
+                'body' => 'Can we use SQLite for the practice project?',
+            ]);
+
+            unset($session);
+        }
+
+        if ($farhana && $design) {
+            $post = CoursePost::create([
+                'course_id' => $design->id,
+                'user_id' => $farhana->id,
+                'title' => 'Share your portfolio for feedback',
+                'body' => 'Post a link to your portfolio in the comments. I will review the first ten submissions this weekend. Focus on showing your process, not just final screens.',
+                'link_url' => null,
+                'is_pinned' => false,
+            ]);
+
+            $comment = Comment::create([
+                'commentable_type' => 'post',
+                'commentable_id' => $post->id,
+                'user_id' => $customer->id,
+                'body' => 'Here is mine: https://example.com/portfolio — I would love feedback on the case study flow.',
+            ]);
+
+            Like::create(['likeable_type' => 'comment', 'likeable_id' => $comment->id, 'user_id' => $farhana->id]);
+            $comment->forceFill(['likes_count' => 1])->saveQuietly();
+
+            $live = LiveSession::create([
+                'course_id' => $design->id,
+                'created_by' => $farhana->id,
+                'title' => 'Live portfolio critique',
+                'description' => 'We are live now. Bring one screen you are proud of and one you are unsure about.',
+                'provider' => 'youtube',
+                'join_url' => 'https://www.youtube.com/watch?v=aqz-KE-bpKQ',
+                'youtube_video_id' => 'aqz-KE-bpKQ',
+                'scheduled_at' => now()->subMinutes(15),
+                'duration_minutes' => 60,
+                'status' => 'live',
+                'started_at' => now()->subMinutes(15),
+                'chat_enabled' => true,
+            ]);
+
+            Comment::create([
+                'commentable_type' => 'live',
+                'commentable_id' => $live->id,
+                'user_id' => $customer->id,
+                'body' => 'The spacing on the pricing page feels tight on mobile.',
+            ]);
+
+            Comment::create([
+                'commentable_type' => 'live',
+                'commentable_id' => $live->id,
+                'user_id' => $farhana->id,
+                'body' => 'Good catch. Try 24px vertical rhythm and check the 375px breakpoint.',
+            ]);
+        }
+    }
+
+    /**
+     * In-app notifications for the demo student (database channel payload shape).
+     *
+     * @param  array<string, Course>  $courses
+     * @param  array<string, Enrollment>  $enrollments
+     */
+    private function seedNotifications(User $customer, User $nusrat, array $courses, array $enrollments): void
+    {
+        $rows = [
+            [$customer, 'payment_received', 'Payment received', 'Your payment for order ORD-20261108-0003 was successful.', ['order_id' => 3], null],
+            [$customer, 'course_enrolled', 'You are enrolled', 'You now have access to "'.$courses['complete-web-development-bootcamp']->title.'".', ['course_id' => $courses['complete-web-development-bootcamp']->id, 'course_slug' => $courses['complete-web-development-bootcamp']->slug], null],
+            [$customer, 'certificate_issued', 'Certificate ready', 'Your certificate for UI/UX Design Masterclass with Figma is ready to download.', ['course_id' => $courses['uiux-design-masterclass-with-figma']->id, 'course_slug' => $courses['uiux-design-masterclass-with-figma']->slug], now()->subDays(2)],
+            [$customer, 'community_post', 'New announcement', 'Arif Chowdhury posted a workshop announcement in Complete Web Development Bootcamp.', ['course_slug' => $courses['complete-web-development-bootcamp']->slug], null],
+            [$customer, 'live_class', 'Live class starting', 'Live portfolio critique is happening now in UI/UX Design Masterclass with Figma.', ['course_slug' => $courses['uiux-design-masterclass-with-figma']->slug], null],
+            [$nusrat, 'course_enrolled', 'You are enrolled', 'You now have access to "'.$courses['python-for-data-science-and-machine-learning']->title.'".', ['course_id' => $courses['python-for-data-science-and-machine-learning']->id, 'course_slug' => $courses['python-for-data-science-and-machine-learning']->slug], now()->subDay()],
+        ];
+
+        foreach ($rows as $index => [$user, $kind, $title, $message, $data, $readAt]) {
+            DB::table('notifications')->insert([
+                'id' => (string) Str::uuid(),
+                'type' => 'App\\Notifications\\LmsNotification',
+                'notifiable_type' => User::class,
+                'notifiable_id' => $user->id,
+                'data' => json_encode([
+                    'kind' => $kind,
+                    'title' => $title,
+                    'message' => $message,
+                    'data' => $data,
+                ]),
+                'read_at' => $readAt,
+                'created_at' => now()->subHours(6 + $index * 5),
+                'updated_at' => now()->subHours(6 + $index * 5),
+            ]);
+        }
+    }
+
     private function refreshCourseStats(): void
     {
         foreach (Course::all() as $course) {
             $course->refreshLessonStats();
             $course->refreshRating();
-            $course->forceFill([
-                'total_students' => $course->enrollments()->where('status', 'active')->count(),
-            ])->saveQuietly();
+            $course->refreshStudentCount();
         }
     }
 }

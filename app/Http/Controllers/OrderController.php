@@ -93,7 +93,14 @@ class OrderController extends Controller
                         throw new \Exception('Insufficient stock for product: ' . $itemName);
                     }
 
-                    $this->createOrderItem($order->id, $product, $variant, $item->quantity, $item->price);
+                    if ($product->status !== 'active') {
+                        throw new \Exception('"'.$product->name.'" is no longer available');
+                    }
+
+                    // Charge the catalog price at order time, never a price stored in the cart.
+                    $livePrice = $variant ? ($variant->offer_price ?? $variant->price) : ($product->offer_price ?? $product->price);
+
+                    $this->createOrderItem($order->id, $product, $variant, $item->quantity, $livePrice);
 
                     if ($availableStock !== null) {
                         $decrement = min($item->quantity, $availableStock);
@@ -191,8 +198,8 @@ class OrderController extends Controller
             }
 
             $product = Product::with('images')->find($productId);
-            if (!$product) {
-                $errors[] = 'Item ' . ($index + 1) . ': Product not found';
+            if (!$product || $product->status !== 'active') {
+                $errors[] = 'Item ' . ($index + 1) . ': Product not available';
                 continue;
             }
 
@@ -504,9 +511,17 @@ class OrderController extends Controller
             $this->coupons->redeem($order, $coupon, $result['discount']);
         }
 
-        // Courses are digital: no delivery charge for course-only orders.
         if ($order->items->isEmpty()) {
+            // Courses are digital: no delivery.
             $order->delivery_charge = 0;
+        } else {
+            if (blank($order->district) || blank($order->city)) {
+                throw new \Exception('Please select your district and area for delivery');
+            }
+
+            $quote = app(\App\Services\DeliveryService::class)->quote($order->district, $productsSubtotal);
+            $order->delivery_charge = $quote['charge'];
+            $order->shipping_method = $quote['label'];
         }
 
         $order->save();
@@ -565,7 +580,8 @@ class OrderController extends Controller
 
         $order->currency = $pricing['currency'] ?? 'BDT';
 
-        $order->delivery_charge = $pricing['delivery_charge'] ?? $request->delivery_charge;
+        // Delivery is priced on the server from the district (see finalizeNewOrder).
+        $order->delivery_charge = 0;
         // Discounts are never taken from the client; the coupon is validated server-side.
         $order->discount_type = 'fixed';
         $order->discount = 0;

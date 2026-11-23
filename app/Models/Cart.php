@@ -20,7 +20,7 @@ class Cart extends Model
     ];
 
     protected $attributes = [
-        'is_selected' => false,
+        'is_selected' => true,
     ];
 
     public function product()

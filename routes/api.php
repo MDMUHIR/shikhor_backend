@@ -7,6 +7,7 @@ use App\Http\Controllers\CartController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\CertificateController;
 use App\Http\Controllers\CouponController;
+use App\Http\Controllers\CommunityController;
 use App\Http\Controllers\CourseCartController;
 use App\Http\Controllers\CourseCategoryController;
 use App\Http\Controllers\CourseController;
@@ -22,6 +23,7 @@ use App\Http\Controllers\ExamAdminController;
 use App\Http\Controllers\ExamController;
 use App\Http\Controllers\InstructorController;
 use App\Http\Controllers\LessonResourceController;
+use App\Http\Controllers\LiveSessionController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\QuizController;
@@ -61,6 +63,7 @@ Route::get('categories', [CategoryController::class, 'getCategories']);
 Route::get('banners', [BannerController::class, 'getBanners']);
 
 Route::get('delivery-charges', [DeliveryChargeController::class, 'getDeliveryCharges']);
+Route::get('delivery-charges/quote', [DeliveryChargeController::class, 'quote']);
 
 Route::get('blogs', [BlogController::class, 'getBlogs']);
 Route::get('blogs/{id}', [BlogController::class, 'getSingleBlog']);
@@ -290,6 +293,33 @@ Route::group(['middleware' => 'auth:sanctum'], function () {
     Route::post('notifications/read-all', [NotificationController::class, 'readAll']);
     Route::post('notifications/{id}/read', [NotificationController::class, 'read']);
 
+    // Course community: announcements, comments, likes and live classes with live chat.
+    // Access (enrolled student / the course's instructor / admin) is enforced inside the controllers.
+    Route::get('courses/{slug}/posts', [CommunityController::class, 'posts']);
+    Route::post('courses/{slug}/posts', [CommunityController::class, 'storePost'])->middleware('throttle:sensitive');
+    Route::post('posts/{id}/update', [CommunityController::class, 'updatePost']);
+    Route::delete('posts/{id}', [CommunityController::class, 'destroyPost']);
+    Route::post('posts/{id}/pin', [CommunityController::class, 'pinPost']);
+    Route::post('posts/{id}/lock-comments', [CommunityController::class, 'lockPost']);
+    Route::post('posts/{id}/like', [CommunityController::class, 'likePost'])->middleware('throttle:cart');
+    Route::get('posts/{id}/comments', [CommunityController::class, 'comments']);
+    Route::post('posts/{id}/comments', [CommunityController::class, 'storeComment'])->middleware('throttle:30,1');
+    Route::delete('comments/{id}', [CommunityController::class, 'destroyComment']);
+    Route::post('comments/{id}/pin', [CommunityController::class, 'pinComment']);
+    Route::post('comments/{id}/like', [CommunityController::class, 'likeComment'])->middleware('throttle:cart');
+    Route::post('courses/{slug}/mute', [CommunityController::class, 'mute']);
+    Route::post('courses/{slug}/unmute', [CommunityController::class, 'unmute']);
+
+    Route::get('courses/{slug}/live-sessions', [LiveSessionController::class, 'index']);
+    Route::post('courses/{slug}/live-sessions', [LiveSessionController::class, 'store'])->middleware('throttle:sensitive');
+    Route::post('live-sessions/{id}/update', [LiveSessionController::class, 'update']);
+    Route::delete('live-sessions/{id}', [LiveSessionController::class, 'destroy']);
+    Route::post('live-sessions/{id}/start', [LiveSessionController::class, 'start']);
+    Route::post('live-sessions/{id}/end', [LiveSessionController::class, 'end']);
+    Route::post('live-sessions/{id}/cancel', [LiveSessionController::class, 'cancel']);
+    Route::post('live-sessions/{id}/lock-chat', [LiveSessionController::class, 'lockChat']);
+    Route::get('live-sessions/{id}/chat', [LiveSessionController::class, 'chat'])->middleware('throttle:90,1');
+    Route::post('live-sessions/{id}/chat', [LiveSessionController::class, 'postChat'])->middleware('throttle:60,1');
     Route::get('lessons/{id}', [LessonController::class, 'show']);
     Route::post('lessons/{id}/complete', [LessonController::class, 'complete']);
     Route::post('lessons/{id}/incomplete', [LessonController::class, 'incomplete']);

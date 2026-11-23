@@ -11,6 +11,7 @@ class DeliveryCharge extends Model
 
     protected $fillable = [
         'name',
+        'zone',
         'charge',
         'minimum_order',
         'status',
